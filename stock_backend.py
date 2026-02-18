@@ -16,7 +16,7 @@ for pkg, imp in [('flask','flask'),('flask-cors','flask_cors'),
         print(f"Installing {pkg}…")
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import yfinance as yf
 import requests as req
