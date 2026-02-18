@@ -22,6 +22,13 @@ import yfinance as yf
 import requests as req
 
 app = Flask(__name__)
+@app.route('/')
+def home():
+    return send_file('stock_tracker.html')
+
+@app.route('/stock_tracker.html')
+def stock_tracker_page():
+    return send_file('stock_tracker.html')
 CORS(app)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
