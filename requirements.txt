@@ -7,3 +7,4 @@ lxml==5.1.0
 yfinance==0.2.33
 pypdf==4.0.1
 Werkzeug==3.0.1
+gunicorn==21.2.0
