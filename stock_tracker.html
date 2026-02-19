@@ -752,6 +752,59 @@
         }
         .dd-expand-btn:hover { border-color: var(--accent-primary); }
 
+        /* Detached floating chat panel */
+        #ddFloatingPanel {
+            display: none;
+            position: fixed;
+            top: 60px; right: 30px;
+            width: 540px; height: 70vh;
+            min-width: 340px; min-height: 300px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+            z-index: 9999;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            resize: both;
+        }
+        #ddFloatingPanel.active { display: flex; }
+        .dd-float-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0.6rem 1rem;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-color);
+            cursor: move;
+            user-select: none;
+            flex-shrink: 0;
+        }
+        .dd-float-header span { font-weight:600; font-size:0.9rem; color:var(--text-primary); }
+        .dd-float-close {
+            background: none; border: none; color: var(--text-secondary);
+            font-size: 1.1rem; cursor: pointer; padding: 0 0.2rem;
+            line-height:1;
+        }
+        .dd-float-close:hover { color: var(--text-primary); }
+        #ddFloatingMessages {
+            flex: 1; overflow-y: auto; padding: 1rem;
+            display: flex; flex-direction: column; gap: 0.75rem;
+        }
+        #ddFloatingInput {
+            display: flex; gap: 0.5rem; padding: 0.75rem;
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+        #ddFloatingInput textarea {
+            flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border-color);
+            border-radius: 8px; color: var(--text-primary); padding: 0.5rem 0.75rem;
+            font-size: 0.9rem; resize: none; height: 40px; font-family: inherit;
+        }
+        #ddFloatingInput button {
+            background: var(--accent-primary); border: none; border-radius: 8px;
+            color: white; padding: 0 1rem; cursor: pointer; font-size: 1rem;
+        }
+
         .dd-subdocs {
             margin-top: 0.4rem;
             display: flex;
@@ -975,7 +1028,10 @@
                 <div class="deepdive-chat">
                     <div class="deepdive-chat-header">
                         <div id="ddChatTitle" style="font-weight:600;color:var(--text-primary);">Select a company to begin</div>
-                        <div id="ddChatStatus" style="font-size:0.8rem;color:var(--text-secondary);">No documents loaded</div>
+                        <div style="display:flex;align-items:center;gap:0.5rem;">
+                            <div id="ddChatStatus" style="font-size:0.8rem;color:var(--text-secondary);">No documents loaded</div>
+                            <button class="dd-expand-btn" onclick="detachAnswerPanel()" title="Pop out into floating window">⤢ Detach</button>
+                        </div>
                     </div>
 
                     <div class="deepdive-messages" id="ddMessages">
@@ -2556,6 +2612,99 @@
 
         document.getElementById('proxyHostInput').addEventListener('change', saveProxySettings);
         document.getElementById('proxyPortInput').addEventListener('change', saveProxySettings);
+    </script>
+    <!-- Detached floating answer panel -->
+    <div id="ddFloatingPanel">
+        <div class="dd-float-header" id="ddFloatHeader">
+            <span id="ddFloatTitle">🔬 Deep Dive AI Analyst</span>
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <button class="dd-expand-btn" onclick="reattachAnswerPanel()" title="Reattach">⤡ Reattach</button>
+                <button class="dd-float-close" onclick="reattachAnswerPanel()">✕</button>
+            </div>
+        </div>
+        <div id="ddFloatingMessages"></div>
+        <div id="ddFloatingInput">
+            <textarea id="ddFloatQuestion" placeholder="Ask anything..." rows="1"
+                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askDeepDiveFloat();}"></textarea>
+            <button onclick="askDeepDiveFloat()">➤</button>
+        </div>
+    </div>
+
+    <script>
+    // ── Detachable answer panel ───────────────────────────────────────────────
+    let _floatDetached = false;
+
+    function detachAnswerPanel() {
+        const panel   = document.getElementById('ddFloatingPanel');
+        const srcMsgs = document.getElementById('ddMessages');
+        const dstMsgs = document.getElementById('ddFloatingMessages');
+        const title   = document.getElementById('ddChatTitle').textContent;
+
+        // Clone current messages into floating panel
+        dstMsgs.innerHTML = srcMsgs.innerHTML;
+        document.getElementById('ddFloatTitle').textContent = '🔬 ' + title;
+
+        panel.classList.add('active');
+        _floatDetached = true;
+
+        // Make it draggable
+        makeDraggable(panel, document.getElementById('ddFloatHeader'));
+
+        // Scroll to bottom
+        dstMsgs.scrollTop = dstMsgs.scrollHeight;
+    }
+
+    function reattachAnswerPanel() {
+        const panel   = document.getElementById('ddFloatingPanel');
+        const srcMsgs = document.getElementById('ddFloatingMessages');
+        const dstMsgs = document.getElementById('ddMessages');
+
+        // Sync messages back
+        dstMsgs.innerHTML = srcMsgs.innerHTML;
+        panel.classList.remove('active');
+        _floatDetached = false;
+        dstMsgs.scrollTop = dstMsgs.scrollHeight;
+    }
+
+    // Mirror new messages to floating panel when detached
+    const _origAppendMsg = window.appendMessage;
+    function appendMessageMirrored(role, content, isLoading) {
+        const result = _origAppendMsg ? _origAppendMsg(role, content, isLoading) : null;
+        if (_floatDetached) {
+            const srcMsgs = document.getElementById('ddMessages');
+            document.getElementById('ddFloatingMessages').innerHTML = srcMsgs.innerHTML;
+            const fm = document.getElementById('ddFloatingMessages');
+            fm.scrollTop = fm.scrollHeight;
+        }
+        return result;
+    }
+
+    async function askDeepDiveFloat() {
+        const q = document.getElementById('ddFloatQuestion').value.trim();
+        if (!q) return;
+        document.getElementById('ddQuestion').value = q;
+        document.getElementById('ddFloatQuestion').value = '';
+        await askDeepDive();
+    }
+
+    function makeDraggable(el, handle) {
+        let ox = 0, oy = 0, x = 0, y = 0;
+        handle.onmousedown = function(e) {
+            e.preventDefault();
+            ox = e.clientX; oy = e.clientY;
+            document.onmousemove = function(e) {
+                x = ox - e.clientX; y = oy - e.clientY;
+                ox = e.clientX; oy = e.clientY;
+                el.style.top  = (el.offsetTop  - y) + 'px';
+                el.style.left = (el.offsetLeft - x) + 'px';
+                el.style.right = 'auto';
+            };
+            document.onmouseup = function() {
+                document.onmouseup = null;
+                document.onmousemove = null;
+            };
+        };
+    }
     </script>
 </body>
 </html>

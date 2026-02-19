@@ -1844,6 +1844,9 @@ def deepdive_screener():
                         continue
                     if href.endswith('/') and 'screener.in/company' in href:
                         continue
+                    # Skip LODR announcement HTML pages — we want direct PDF transcript links only
+                    if 'corporates/ann.html' in href or 'bseindia.com/corporates' in href:
+                        continue
                     # Only match on title/href — not parent text, to avoid false positives
                     text_lo = (title + ' ' + href).lower()
                     if any(kw in text_lo for kw in CONCALL_KWS) and 'recording' not in text_lo:
