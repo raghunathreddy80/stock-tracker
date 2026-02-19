@@ -1683,7 +1683,8 @@
         }
 
         // Backend API URL
-        const API_URL = window.location.origin;
+        // Auto-detect API URL (works both locally and on Render)
+        const API_URL = window.location.origin + '/api';
 
         // Check if backend is running
         async function checkBackend() {
