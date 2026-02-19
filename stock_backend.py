@@ -116,7 +116,9 @@ def resolve_bse_code(base_symbol, proxies=None):
 
 
 app = Flask(__name__)
-CORS(app)
+# Disable response buffering so SSE streams flush immediately to the client
+app.config['PROPAGATE_EXCEPTIONS'] = True
+CORS(app, supports_credentials=True)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -2574,32 +2576,62 @@ def deepdive_fetch_docs():
         }
 
     def generate():
-        # Immediately send a keep-alive comment so the browser knows the connection is open
-        yield ": keep-alive\n\n"
-        max_workers = min(5, max(1, len(docs)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(fetch_one, (i, doc)): i for i, doc in enumerate(docs)}
-            for future in as_completed(futures):
-                try:
-                    _, result = future.result()
-                except Exception as e:
-                    i = futures[future]
-                    doc = docs[i]
-                    result = {
-                        'index': i,
-                        'url': doc.get('url', ''),
-                        'title': doc.get('title', ''),
-                        'type': doc.get('type', ''),
-                        'text': '',
-                        'error': str(e),
-                        'length': 0
-                    }
-                yield f"data: {_json.dumps(result)}\n\n"
-        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}\n\n"
+        import queue, threading, time
+        yield ": keep-alive
 
-    response = app.response_class(generate(), mimetype='text/event-stream')
+"
+
+        result_q = queue.Queue()
+        max_workers = min(5, max(1, len(docs)))
+
+        def worker():
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_one, (i, doc)): i for i, doc in enumerate(docs)}
+                for future in as_completed(futures):
+                    try:
+                        _, result = future.result()
+                    except Exception as e:
+                        i = futures[future]
+                        doc = docs[i]
+                        result = {
+                            'index': i,
+                            'url': doc.get('url', ''),
+                            'title': doc.get('title', ''),
+                            'type': doc.get('type', ''),
+                            'text': '',
+                            'error': str(e),
+                            'length': 0
+                        }
+                    result_q.put(result)
+            result_q.put(None)  # sentinel
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
+        while True:
+            try:
+                result = result_q.get(timeout=10)
+                if result is None:
+                    break
+                yield f"data: {_json.dumps(result)}
+
+"
+            except queue.Empty:
+                # Send heartbeat comment to keep connection alive on Render
+                yield ": heartbeat
+
+"
+
+        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}
+
+"
+
+    from flask import Response
+    response = Response(generate(), mimetype='text/event-stream',
+                        direct_passthrough=True)
     response.headers['Cache-Control'] = 'no-cache'
-    response.headers['X-Accel-Buffering'] = 'no'   # disable nginx buffering
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Connection'] = 'keep-alive'
     return response
 
 
