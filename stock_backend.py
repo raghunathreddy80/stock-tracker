@@ -2472,71 +2472,104 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
     Returns: (text_content, error_msg)
     """
     try:
-        # Install pypdf if needed
+        import pypdf
+    except ImportError:
+        print("  Installing pypdf...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pypdf', '--break-system-packages', '-q'])
+        import pypdf
+
+    print(f"  Fetching PDF: {pdf_url[:80]}...")
+
+    def _try_fetch(url, headers, timeout=30):
         try:
-            import pypdf
-        except ImportError:
-            print("  Installing pypdf...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pypdf', '--break-system-packages', '-q'])
-            import pypdf
-        
-        print(f"  Fetching PDF: {pdf_url[:80]}...")
-        
-        # Fetch PDF - use BSE headers if it's a BSE URL
-        if 'bseindia.com' in pdf_url:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Origin': 'https://www.bseindia.com',
-                'Referer': 'https://www.bseindia.com/',
-                'sec-fetch-site': 'same-site',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-dest': 'empty',
-            }
-        else:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        
-        resp = req.get(pdf_url, headers=headers, timeout=30, proxies=proxies, stream=True)
-        
-        if not resp.ok:
-            return '', f'HTTP {resp.status_code}'
-        
-        print(f"  Downloaded {len(resp.content)} bytes, extracting text...")
-        
-        # Extract text from PDF
-        import io
-        pdf_file = io.BytesIO(resp.content)
-        
-        try:
-            reader = pypdf.PdfReader(pdf_file)
+            r = req.get(url, headers=headers, timeout=timeout, proxies=proxies, stream=True)
+            return r
         except Exception as e:
-            error_msg = str(e)
-            # Check if it's not a PDF
-            if 'invalid pdf header' in error_msg.lower():
-                return '', 'Not a PDF file (might be HTML, audio, or other format)'
-            return '', f'PDF read error: {error_msg[:100]}'
-        
-        total_pages = len(reader.pages)
-        pages_to_read = min(total_pages, max_pages)
-        
-        text_parts = []
-        for i in range(pages_to_read):
+            print(f"  Fetch error: {e}")
+            return None
+
+    # --- BSE URLs: AttachLive needs a session, AttachHis works with headers ---
+    if 'bseindia.com' in pdf_url:
+        bse_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://www.bseindia.com',
+            'Referer': 'https://www.bseindia.com/',
+            'sec-fetch-site': 'same-site',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-dest': 'empty',
+        }
+        resp = _try_fetch(pdf_url, bse_headers)
+
+        # AttachLive often needs a live BSE session — try establishing one first
+        if (resp is None or not resp.ok) and 'AttachLive' in pdf_url:
+            print(f"  AttachLive failed directly, trying with BSE session...")
             try:
-                page = reader.pages[i]
-                text = page.extract_text()
-                if text:
-                    text_parts.append(text)
-            except:
-                pass
-        
-        full_text = '\n\n'.join(text_parts)
-        print(f"  Extracted {len(full_text)} characters from {pages_to_read}/{total_pages} pages")
-        
-        return full_text, None
-        
+                sess = req.Session()
+                sess.get('https://www.bseindia.com', headers=bse_headers, timeout=10, proxies=proxies)
+                resp = sess.get(pdf_url, headers=bse_headers, timeout=30, proxies=proxies, stream=True)
+            except Exception as e:
+                print(f"  BSE session fetch error: {e}")
+                return '', f'BSE session fetch failed: {e}'
+
+        # Try AttachHis fallback if AttachLive still fails
+        if (resp is None or not resp.ok) and 'AttachLive' in pdf_url:
+            fallback_url = pdf_url.replace('AttachLive', 'AttachHis')
+            print(f"  Trying AttachHis fallback...")
+            resp = _try_fetch(fallback_url, bse_headers)
+
+    else:
+        # Non-BSE: try with a realistic browser UA and common headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/pdf,*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        resp = _try_fetch(pdf_url, headers, timeout=45)
+
+    if resp is None:
+        return '', 'Request failed (timeout or connection error)'
+    if not resp.ok:
+        return '', f'HTTP {resp.status_code}'
+
+    try:
+        content_bytes = resp.content
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return '', str(e)
+        return '', f'Failed to read response body: {e}'
+
+    print(f"  Downloaded {len(content_bytes)} bytes, extracting text...")
+
+    import io
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+    except Exception as e:
+        error_msg = str(e).lower()
+        if 'invalid pdf header' in error_msg or 'eoferror' in error_msg:
+            # Peek at content to give a better error
+            preview = content_bytes[:200].decode('utf-8', errors='replace')
+            if '<html' in preview.lower():
+                return '', 'Got HTML instead of PDF (login wall or redirect)'
+            return '', f'Not a valid PDF file'
+        return '', f'PDF read error: {str(e)[:120]}'
+
+    total_pages = len(reader.pages)
+    pages_to_read = min(total_pages, max_pages)
+
+    text_parts = []
+    for i in range(pages_to_read):
+        try:
+            text = reader.pages[i].extract_text()
+            if text and text.strip():
+                text_parts.append(text)
+        except Exception as e:
+            print(f"  Page {i} extract error: {e}")
+
+    full_text = '\n\n'.join(text_parts)
+    print(f"  Extracted {len(full_text)} characters from {pages_to_read}/{total_pages} pages")
+
+    if not full_text.strip():
+        return '', f'Image-based PDF — no extractable text (scanned document, {total_pages} pages)'
+
+    return full_text, None
 
 
 @app.route('/api/deepdive/fetch-docs', methods=['POST'])
