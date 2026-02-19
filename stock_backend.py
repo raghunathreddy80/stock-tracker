@@ -947,66 +947,7 @@ def deepdive_fetch():
         return None
 
     # ── BSE: get scrip code ───────────────────────────────────────────────────
-    # BSE scrip codes are numeric e.g. 532540=TCS, 500180=HDFCBANK, 544218=IEX
-    # The 'bse' pip package has a verified lookup. Fall back to direct API calls.
-    bse_code = ''
-
-    # Method 1: 'bse' pip package — most reliable, wraps the correct BSE API
-    try:
-        try:
-            from bse import BSE as BsePkg
-        except ImportError:
-            print(f"  Installing bse package...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'bse',
-                                   '--break-system-packages', '-q'])
-            from bse import BSE as BsePkg
-        import tempfile
-        with BsePkg(download_folder=tempfile.gettempdir()) as bse_pkg:
-            result = bse_pkg.lookup(base_symbol)
-            if result and result.get('bse_code'):
-                bse_code = str(result['bse_code'])
-                print(f"  BSE code (bse pkg): {bse_code} — {result.get('company_name','')}")
-    except Exception as e:
-        print(f"  BSE pkg lookup error: {e}")
-
-    # Method 2: BSE fetchComp search API
-    if not bse_code:
-        try:
-            r = safe_get(
-                f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                f"?companySortOrder=A&industry=&issuerType=C&turnover="
-                f"&companyType=&mktcap=&segment=&status=Active"
-                f"&indexType=&pageno=1&pagesize=25&search={base_symbol}",
-                BSE_HDR, timeout=8)
-            if r:
-                items = r.json().get('Table', [])
-                for item in items:
-                    sym = (item.get('nsesymbol') or item.get('NSESymbol') or '').upper()
-                    if sym == base_symbol:
-                        bse_code = str(item.get('scripcode') or item.get('Scripcode') or '')
-                        print(f"  BSE code (fetchComp): {bse_code}")
-                        break
-        except Exception as e:
-            print(f"  BSE fetchComp error: {e}")
-
-    # Method 3: BSE text search
-    if not bse_code:
-        try:
-            r = safe_get(
-                f"https://api.bseindia.com/BseIndiaAPI/api/Search/w?str={base_symbol}&type=D",
-                BSE_HDR, timeout=8)
-            if r:
-                results = r.json()
-                items = results if isinstance(results, list) else results.get('Table', [])
-                for item in items:
-                    sym = (item.get('NSESYMBOL') or item.get('nsesymbol') or '').upper()
-                    if sym == base_symbol:
-                        bse_code = str(item.get('SCRIP_CD') or item.get('scripcode') or '')
-                        print(f"  BSE code (Search): {bse_code}")
-                        break
-        except Exception as e:
-            print(f"  BSE Search error: {e}")
-
+    bse_code = resolve_bse_code(base_symbol, proxies)
     print(f"  BSE code for {base_symbol}: '{bse_code}'")
 
     # ── BSE filings helper ────────────────────────────────────────────────────
@@ -1431,33 +1372,7 @@ def deepdive_alldocs():
             return None
 
         # ── Get BSE code ──────────────────────────────────────────────────────
-        bse_code = ''
-        try:
-            from bse import BSE as BsePkg
-            import tempfile
-            with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
-                result = bpkg.lookup(base_symbol)
-                if result and result.get('bse_code'):
-                    bse_code = str(result['bse_code'])
-                    print(f"  BSE code: {bse_code}")
-        except Exception as e:
-            print(f"  BSE pkg: {e}")
-
-        if not bse_code:
-            try:
-                r = safe_get(
-                    f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                    f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
-                    f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base_symbol}",
-                    BSE_HDR, timeout=8)
-                if r:
-                    for item in r.json().get('Table', []):
-                        if (item.get('nsesymbol') or item.get('NSESymbol','') ).upper() == base_symbol:
-                            bse_code = str(item.get('scripcode') or item.get('Scripcode',''))
-                            break
-            except Exception as e:
-                print(f"  BSE fetchComp: {e}")
-
+        bse_code = resolve_bse_code(base_symbol, proxies)
         print(f"  BSE code: '{bse_code}'")
 
         # ── Fetch from BSE ────────────────────────────────────────────────────
@@ -2262,33 +2177,7 @@ def deepdive_screener():
             }
 
             # Resolve BSE scrip code
-            bse_code = ''
-            try:
-                from bse import BSE as BsePkg
-                import tempfile
-                with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
-                    result = bpkg.lookup(base_symbol)
-                    if result and result.get('bse_code'):
-                        bse_code = str(result['bse_code'])
-                        print(f"  BSE code (pkg): {bse_code}")
-            except Exception as be:
-                print(f"  BSE pkg: {be}")
-
-            if not bse_code:
-                try:
-                    rb = req.get(
-                        f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                        f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
-                        f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base_symbol}",
-                        headers=BSE_HDR, timeout=10, proxies=proxies)
-                    if rb.ok:
-                        for item in rb.json().get('Table', []):
-                            if (item.get('nsesymbol') or item.get('NSESymbol', '')).upper() == base_symbol:
-                                bse_code = str(item.get('scripcode') or item.get('Scripcode', ''))
-                                print(f"  BSE code (fetchComp): {bse_code}")
-                                break
-                except Exception as be2:
-                    print(f"  BSE fetchComp: {be2}")
+            bse_code = resolve_bse_code(base_symbol, proxies)
 
             if bse_code:
                 from urllib.parse import quote as _uq
@@ -2775,22 +2664,6 @@ Document context:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e), 'answer': ''}), 500
-        
-        print(f"  Response length: {len(answer)} chars")
-        
-        return jsonify({'answer': answer})
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e), 'answer': ''}), 500
-
-
-if __name__ == '__main__':
-    print("=" * 55)
-    print("  Stock Tracker Backend  –  http://localhost:5000")
-    print("=" * 55)
-    app.run(debug=True, port=5000, host='0.0.0.0')
 
 
 @app.route('/api/debug/bse', methods=['POST'])
@@ -2815,46 +2688,12 @@ def debug_bse():
     
     # Step 1: Resolve BSE code
     results['steps'].append('=== STEP 1: Resolve BSE Code ===')
-    bse_code = ''
-    
-    # Try bse package
-    try:
-        from bse import BSE as BsePkg
-        import tempfile
-        with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
-            result = bpkg.lookup(symbol)
-            if result:
-                bse_code = str(result.get('bse_code', ''))
-                results['steps'].append(f"✓ bse pkg: {bse_code}")
-                results['bse_code'] = bse_code
-    except Exception as e:
-        results['steps'].append(f"✗ bse pkg error: {str(e)}")
-    
-    # Try fetchComp if still no code
-    if not bse_code:
-        try:
-            url = (f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                   f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
-                   f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={symbol}")
-            results['steps'].append(f"Trying fetchComp: {url[:100]}...")
-            r = req.get(url, headers=BSE_HDR, timeout=10)
-            results['steps'].append(f"  HTTP {r.status_code}")
-            if r.ok:
-                data = r.json()
-                results['fetchComp_response'] = data
-                for item in data.get('Table', []):
-                    sym = (item.get('nsesymbol') or item.get('NSESymbol', '')).upper()
-                    if sym == symbol:
-                        bse_code = str(item.get('scripcode') or item.get('Scripcode', ''))
-                        results['steps'].append(f"✓ fetchComp match: {bse_code}")
-                        results['bse_code'] = bse_code
-                        break
-                if not bse_code:
-                    results['steps'].append(f"✗ No match in {len(data.get('Table',[]))} results")
-        except Exception as e:
-            results['steps'].append(f"✗ fetchComp error: {str(e)}")
-    
-    if not bse_code:
+    bse_code = resolve_bse_code(symbol)
+    if bse_code:
+        results['steps'].append(f"✓ BSE code resolved: {bse_code}")
+        results['bse_code'] = bse_code
+    else:
+        results['steps'].append("✗ Failed to resolve BSE code")
         results['steps'].append("!! FAILED to resolve BSE code")
         return jsonify(results)
     
@@ -2923,36 +2762,7 @@ def deepdive_simple():
         # ═══════════════════════════════════════════════════════════
         # GET BSE CODE
         # ═══════════════════════════════════════════════════════════
-        bse_code = None
-        
-        # Method 1: bse package
-        try:
-            from bse import BSE as BsePkg
-            import tempfile
-            with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
-                result = bpkg.lookup(base_symbol)
-                if result and result.get('bse_code'):
-                    bse_code = str(result['bse_code'])
-                    print(f"  BSE code (pkg): {bse_code}")
-        except Exception as e:
-            print(f"  BSE pkg error: {e}")
-        
-        # Method 2: fetchComp API
-        if not bse_code:
-            try:
-                hdr = {'User-Agent': 'Mozilla/5.0'}
-                url = f"https://api.bseindia.com/BseIndiaAPI/api/ComHeadernew/w?quotetype=EQ&scripcode=&seriesid="
-                r = req.get(url, headers=hdr, timeout=10, proxies=proxies)
-                if r.ok:
-                    data = r.json()
-                    if 'Table' in data and len(data['Table']) > 0:
-                        for item in data['Table']:
-                            if item.get('scrip_cd'):
-                                bse_code = str(item['scrip_cd'])
-                                print(f"  BSE code (fetchComp): {bse_code}")
-                                break
-            except Exception as e:
-                print(f"  fetchComp error: {e}")
+        bse_code = resolve_bse_code(base_symbol, proxies)
         
         if not bse_code:
             return jsonify({
@@ -3345,3 +3155,10 @@ def deepdive_simple():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+if __name__ == '__main__':
+    print("=" * 55)
+    print("  Stock Tracker Backend  –  http://localhost:5000")
+    print("=" * 55)
+    app.run(debug=True, port=5000, host='0.0.0.0')
