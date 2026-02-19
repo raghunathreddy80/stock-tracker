@@ -181,15 +181,21 @@ def get_user_watchlist_api():
             try:
                 ticker = yf.Ticker(symbol)
                 data = ticker.info
-                stock['price'] = data.get('currentPrice', 0)
+                stock['price'] = data.get('currentPrice', 0) or data.get('regularMarketPrice', 0)
                 stock['change'] = data.get('regularMarketChange', 0)
                 stock['changePercent'] = data.get('regularMarketChangePercent', 0)
-            except:
+                stock['volume'] = data.get('volume', 0)
+            except Exception as e:
+                print(f"Error fetching price for {symbol}: {e}")
                 stock['price'] = 0
                 stock['change'] = 0
                 stock['changePercent'] = 0
+                stock['volume'] = 0
+        
+        print(f"Returning watchlist with {len(watchlist)} stocks")
         return jsonify(watchlist)
     except Exception as e:
+        print(f"Watchlist API error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/watchlist/add', methods=['POST'])
