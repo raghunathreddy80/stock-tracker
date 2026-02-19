@@ -846,16 +846,6 @@
                     <p>Real-time Portfolio Management</p>
                 </div>
             </div>
-            <div class="proxy-settings">
-                <div class="proxy-toggle">
-                    <span style="color: var(--text-secondary);">Proxy:</span>
-                    <div class="toggle-switch" id="proxyToggle" onclick="toggleProxy()">
-                        <div class="toggle-slider"></div>
-                    </div>
-                </div>
-                <input type="text" class="proxy-input" id="proxyHostInput" placeholder="http://www-proxy.example.com" disabled style="width: 280px;">
-                <input type="text" class="proxy-input" id="proxyPortInput" placeholder="Port (e.g. 8080)" disabled style="width: 130px;">
-            </div>
         </div>
 
         <div class="tabs">
@@ -1035,31 +1025,10 @@
         
         const WATCHLIST_KEY = 'stockTracker_watchlist';
         const PORTFOLIO_KEY = 'stockTracker_portfolio';
-        const PROXY_KEY = 'stockTracker_proxy';
-
         let watchlist = [];
         let portfolio = [];
-        let proxyEnabled = false;
-        let proxyHost = '';
-        let proxyPort = '';
         let updateInterval;
         let chartInstance = null;
-
-        // Returns {host, port} from the two input fields - no modifications to host
-        function parseProxy() {
-            if (!proxyEnabled) return { host: '', port: '' };
-            const h = (document.getElementById('proxyHostInput').value || '').trim();
-            const p = (document.getElementById('proxyPortInput').value || '').trim();
-            return { host: h, port: p };
-        }
-
-        function addProxyParams(url) {
-            const { host, port } = parseProxy();
-            if (host && port) {
-                url += `&proxy_host=${encodeURIComponent(host)}&proxy_port=${encodeURIComponent(port)}`;
-            }
-            return url;
-        }
 
         async function init() {
             // Check if backend is running
@@ -1070,21 +1039,6 @@
             renderPortfolio();
             updatePrices();
             startAutoUpdate();
-            
-            const savedProxy = localStorage.getItem(PROXY_KEY);
-            if (savedProxy) {
-                const proxyData = JSON.parse(savedProxy);
-                proxyEnabled = proxyData.enabled;
-                proxyHost    = proxyData.host || '';
-                proxyPort    = proxyData.port || '';
-                document.getElementById('proxyHostInput').value = proxyHost;
-                document.getElementById('proxyPortInput').value = proxyPort;
-                if (proxyEnabled) {
-                    document.getElementById('proxyToggle').classList.add('active');
-                    document.getElementById('proxyHostInput').disabled = false;
-                    document.getElementById('proxyPortInput').disabled = false;
-                }
-            }
         }
 
         async function loadFromStorage() {
@@ -1679,36 +1633,6 @@
                 .replace(/^(.+)$/, '<p>$1</p>');
         }
 
-        function toggleProxy() {
-            const toggle   = document.getElementById('proxyToggle');
-            const hostInput = document.getElementById('proxyHostInput');
-            const portInput = document.getElementById('proxyPortInput');
-            
-            proxyEnabled = !proxyEnabled;
-            
-            if (proxyEnabled) {
-                toggle.classList.add('active');
-                hostInput.disabled = false;
-                portInput.disabled = false;
-            } else {
-                toggle.classList.remove('active');
-                hostInput.disabled = true;
-                portInput.disabled = true;
-            }
-            
-            saveProxySettings();
-        }
-
-        function saveProxySettings() {
-            proxyHost = document.getElementById('proxyHostInput').value.trim();
-            proxyPort = document.getElementById('proxyPortInput').value.trim();
-            localStorage.setItem(PROXY_KEY, JSON.stringify({
-                enabled: proxyEnabled,
-                host: proxyHost,
-                port: proxyPort
-            }));
-        }
-
         // Backend API URL
         // Auto-detect API URL (works both locally and on Render)
         const API_URL = window.location.origin + '/api';
@@ -1769,8 +1693,7 @@
         async function searchIndiaStocks(query) {
             try {
                 console.log('Searching for:', query);
-                let url = `${API_URL}/search?q=${encodeURIComponent(query)}`;
-                url = addProxyParams(url);
+                const url = `${API_URL}/search?q=${encodeURIComponent(query)}`;
                 const response = await fetch(url);
                 
                 if (!response.ok) {
@@ -1795,8 +1718,7 @@
         async function fetchStockPrice(symbol) {
             try {
                 console.log('Fetching price for:', symbol);
-                let url = `${API_URL}/quote?symbol=${encodeURIComponent(symbol)}`;
-                url = addProxyParams(url);
+                const url = `${API_URL}/quote?symbol=${encodeURIComponent(symbol)}`;
                 const response = await fetch(url);
                 
                 if (!response.ok) {
@@ -2350,31 +2272,20 @@
         async function updatePrices() {
             if (watchlist.length === 0 && portfolio.length === 0) return;
             
+            console.log('🔄 Auto-refreshing prices...');
             document.getElementById('updateIndicator').style.display = 'flex';
+            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Refreshing prices...</span>';
             
             try {
-                for (const stock of watchlist) {
-                    const priceData = await fetchStockPrice(stock.symbol);
-                    if (priceData) {
-                        stock.price = priceData.price;
-                        stock.change = priceData.change;
-                        stock.changePercent = priceData.changePercent;
-                        stock.volume = priceData.volume;
-                    }
-                }
+                // Reload watchlist and portfolio from database (backend fetches fresh prices)
+                await loadFromStorage();
                 
-                for (const stock of portfolio) {
-                    const priceData = await fetchStockPrice(stock.symbol);
-                    if (priceData) {
-                        stock.price = priceData.price;
-                        stock.totalValue = priceData.price * stock.quantity;
-                    }
-                }
-                
+                // Re-render both
                 renderWatchlist();
                 renderPortfolio();
                 updatePortfolioChart();
-                saveToStorage();
+                
+                console.log('✓ Prices refreshed');
             } catch (error) {
                 console.error('Update error:', error);
             } finally {

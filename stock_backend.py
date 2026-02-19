@@ -180,11 +180,20 @@ def get_user_watchlist_api():
             symbol = stock['symbol']
             try:
                 ticker = yf.Ticker(symbol)
-                data = ticker.info
-                stock['price'] = data.get('currentPrice', 0) or data.get('regularMarketPrice', 0)
-                stock['change'] = data.get('regularMarketChange', 0)
-                stock['changePercent'] = data.get('regularMarketChangePercent', 0)
-                stock['volume'] = data.get('volume', 0)
+                # Use history for more reliable data
+                hist = ticker.history(period='1d')
+                if not hist.empty:
+                    current_price = hist['Close'].iloc[-1]
+                    previous_close = ticker.info.get('previousClose', current_price)
+                    stock['price'] = round(current_price, 2)
+                    stock['change'] = round(current_price - previous_close, 2)
+                    stock['changePercent'] = round(((current_price - previous_close) / previous_close * 100), 2) if previous_close else 0
+                    stock['volume'] = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+                else:
+                    stock['price'] = 0
+                    stock['change'] = 0
+                    stock['changePercent'] = 0
+                    stock['volume'] = 0
             except Exception as e:
                 print(f"Error fetching price for {symbol}: {e}")
                 stock['price'] = 0
@@ -247,8 +256,12 @@ def get_user_portfolio_api():
             symbol = holding['symbol']
             try:
                 ticker = yf.Ticker(symbol)
-                data = ticker.info
-                current_price = data.get('currentPrice', 0)
+                hist = ticker.history(period='1d')
+                
+                if not hist.empty:
+                    current_price = round(hist['Close'].iloc[-1], 2)
+                else:
+                    current_price = 0
                 
                 holding['current_price'] = current_price
                 holding['current_value'] = current_price * holding['quantity']
@@ -259,6 +272,7 @@ def get_user_portfolio_api():
                     if holding['invested_value'] > 0 else 0
                 )
             except Exception as e:
+                print(f"Error fetching price for {symbol}: {e}")
                 holding['current_price'] = 0
                 holding['current_value'] = 0
                 holding['invested_value'] = holding['buy_price'] * holding['quantity']
