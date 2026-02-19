@@ -1171,6 +1171,7 @@
         // ═══════════════════════════════════════════════════════════
         let ddContext = '';
         let ddCompany = '';
+        let ddFetchAbortController = null;  // cancels in-progress fetch-docs stream
         let ddSymbol = '';
         let ddChatHistory = [];
         let ddDocuments = { annual: [], concalls: [], presentations: [] };
@@ -1210,6 +1211,12 @@
             document.getElementById('ddSendBtn').disabled = true;
             document.getElementById('ddQuestion').placeholder = 'Select documents to read first...';
             
+            // Cancel any in-progress document fetch stream
+            if (ddFetchAbortController) {
+                ddFetchAbortController.abort();
+                ddFetchAbortController = null;
+            }
+
             // Clear chat completely
             ddContext = '';
             ddChatHistory = [];
@@ -1392,9 +1399,14 @@
                 document.getElementById('ddChatStatus').textContent =
                     `Reading 0 / ${docsToFetch.length} documents...`;
 
+                // Lock dropdown so user can't switch company mid-read
+                document.getElementById('ddStockSelect').disabled = true;
+
+                ddFetchAbortController = new AbortController();
                 const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: ddFetchAbortController.signal,
                     body: JSON.stringify({
                         docs: docsToFetch,
                         proxy_host: proxyHost,
@@ -1451,10 +1463,13 @@
                 if (failCount > 0) statusMsg += ` (${failCount} documents couldn't be processed)`;
                 statusMsg += ` Ask me anything about the company!`;
 
+                ddFetchAbortController = null;
+                document.getElementById('ddStockSelect').disabled = false;
                 ddAddSystemMessage(statusMsg);
                 
             } catch (error) {
                 console.error('Fetch docs error:', error);
+                document.getElementById('ddStockSelect').disabled = false;
                 document.getElementById('ddChatStatus').textContent = `Error fetching documents: ${error.message}`;
                 ddAddSystemMessage(`Could not fetch document text. I can still answer questions using my general knowledge.`);
             }
