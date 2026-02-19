@@ -1397,12 +1397,17 @@
             
             if (annual_reports.length > 0) {
                 annual_reports.forEach((doc, idx) => {
+                    const cleanTitle = (doc.title || '')
+                        .replace(/\s*from\s+bse\s*/i, '')
+                        .replace(/\s*from\s+nse\s*/i, '')
+                        .replace(/\s*from\s+screener\s*/i, '')
+                        .trim();
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
                             <input type="checkbox" class="doc-checkbox annual-checkbox" data-type="annual" data-index="${idx}" checked style="margin-right:0.5rem;">
                             <span class="dd-source-icon">📄</span>
                             <div style="flex:1;min-width:0;">
-                                <div class="dd-source-name">${doc.title}</div>
+                                <div class="dd-source-name">${cleanTitle}</div>
                                 <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.2rem;">
                                     Source: ${doc.source}
                                 </div>
@@ -2131,8 +2136,15 @@
                 const cv = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
                 return sum + cv;
             }, 0);
+
+            // Sort by current value descending
+            const sortedPortfolio = [...portfolio].sort((a, b) => {
+                const va = (a.current_price || a.price || 0) * (a.quantity || 0);
+                const vb = (b.current_price || b.price || 0) * (b.quantity || 0);
+                return vb - va;
+            });
             
-            tbody.innerHTML = portfolio.map(stock => {
+            tbody.innerHTML = sortedPortfolio.map(stock => {
                 const currentValue = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
                 const investedValue = (stock.buy_price || stock.price || 0) * (stock.quantity || 0);
                 const profitLoss = currentValue - investedValue;
@@ -2144,18 +2156,11 @@
                     <tr>
                         <td>
                             <div class="company-name">${stock.name}</div>
-                            <div style="font-size:0.8rem;color:var(--text-secondary);">${stock.symbol}</div>
                         </td>
                         <td class="price">₹${(stock.current_price || stock.price || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                         <td>${stock.quantity || 0}</td>
                         <td class="price">₹${currentValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                        <td>
-                            <div>${portfolioPct.toFixed(2)}%</div>
-                            <div class="${profitLossClass}" style="font-size:0.8rem;">
-                                P&L: ${profitLoss >= 0 ? '+' : ''}₹${profitLoss.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                                (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
-                            </div>
-                        </td>
+                        <td>${portfolioPct.toFixed(2)}%</td>
                         <td>
                             <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromPortfolio(${stock.id})">Remove</button>
                         </td>
