@@ -40,6 +40,21 @@ def init_db():
         )
     ''')
     
+    # Portfolio table (user-specific holdings)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            buy_price REAL NOT NULL,
+            buy_date TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -158,6 +173,81 @@ def remove_from_watchlist(user_id, symbol):
     
     c.execute('DELETE FROM watchlists WHERE user_id = ? AND symbol = ?', 
               (user_id, symbol))
+    
+    conn.commit()
+    conn.close()
+
+# Portfolio functions
+def get_user_portfolio(user_id):
+    """Get user's portfolio holdings"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    c.execute('''
+        SELECT id, symbol, name, quantity, buy_price, buy_date, added_at 
+        FROM portfolio
+        WHERE user_id = ?
+        ORDER BY added_at DESC
+    ''', (user_id,))
+    
+    portfolio = c.fetchall()
+    conn.close()
+    
+    return [{
+        'id': p[0],
+        'symbol': p[1], 
+        'name': p[2], 
+        'quantity': p[3],
+        'buy_price': p[4],
+        'buy_date': p[5],
+        'added_at': p[6]
+    } for p in portfolio]
+
+def add_to_portfolio(user_id, symbol, name, quantity, buy_price, buy_date=None):
+    """Add holding to user's portfolio"""
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        
+        c.execute('''
+            INSERT INTO portfolio (user_id, symbol, name, quantity, buy_price, buy_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, symbol, name, quantity, buy_price, buy_date))
+        
+        holding_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        return holding_id
+    except Exception as e:
+        print(f"Error adding to portfolio: {e}")
+        return None
+
+def update_portfolio_holding(user_id, holding_id, quantity, buy_price):
+    """Update an existing portfolio holding"""
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        
+        c.execute('''
+            UPDATE portfolio 
+            SET quantity = ?, buy_price = ?
+            WHERE id = ? AND user_id = ?
+        ''', (quantity, buy_price, holding_id, user_id))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error updating portfolio: {e}")
+        return False
+
+def remove_from_portfolio(user_id, holding_id):
+    """Remove holding from user's portfolio"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    c.execute('DELETE FROM portfolio WHERE id = ? AND user_id = ?', 
+              (holding_id, user_id))
     
     conn.commit()
     conn.close()

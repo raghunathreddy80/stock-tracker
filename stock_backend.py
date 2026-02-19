@@ -18,6 +18,12 @@ for pkg, imp in [('flask','flask'),('flask-cors','flask_cors'),
 
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
+from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from auth import (init_db, create_user, verify_user, get_user_by_id, 
+                  update_last_login, get_user_watchlist, add_to_watchlist, 
+                  remove_from_watchlist, get_user_portfolio, add_to_portfolio,
+                  update_portfolio_holding, remove_from_portfolio)
+
 import yfinance as yf
 import requests as req
 
@@ -30,6 +36,32 @@ def home():
 def stock_tracker_page():
     return send_file('stock_tracker.html')
 CORS(app)
+
+# Initialize Flask-Login
+login_manager = LoginManager()
+login_manager.init_app(app)
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production')
+
+# Initialize database
+init_db()
+
+@login_manager.user_loader
+def load_user(user_id):
+    return get_user_by_id(int(user_id))
+
+# Serve HTML pages
+@app.route('/')
+def home():
+    return send_file('login.html')
+
+@app.route('/login.html')
+def login_page():
+    return send_file('login.html')
+
+@app.route('/stock_tracker.html')
+def stock_tracker_page():
+    return send_file('stock_tracker.html')
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def make_proxies(host, port):
@@ -72,6 +104,277 @@ def parse_date(s):
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════════════
+# AUTHENTICATION ROUTES
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Register a new user"""
+    try:
+        data = request.get_json()
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+        
+        if not username or not email or not password:
+            return jsonify({'success': False, 'message': 'All fields required'}), 400
+        
+        if len(password) < 6:
+            return jsonify({'success': False, 'message': 'Password must be at least 6 characters'}), 400
+        
+        user_id = create_user(username, email, password)
+        if user_id:
+            return jsonify({'success': True, 'message': 'User created successfully'})
+        return jsonify({'success': False, 'message': 'Username or email already exists'}), 400
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Login user"""
+    try:
+        data = request.get_json()
+        username = data.get('username', '').strip()
+        password = data.get('password', '')
+        
+        if not username or not password:
+            return jsonify({'success': False, 'message': 'Username and password required'}), 400
+        
+        user = verify_user(username, password)
+        if user:
+            login_user(user)
+            update_last_login(user.id)
+            return jsonify({'success': True, 'username': user.username, 'user_id': user.id})
+        
+        return jsonify({'success': False, 'message': 'Invalid username or password'}), 401
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/auth/logout', methods=['POST'])
+@login_required
+def logout():
+    """Logout user"""
+    logout_user()
+    return jsonify({'success': True})
+
+@app.route('/api/auth/check', methods=['GET'])
+def check_auth():
+    """Check if user is authenticated"""
+    if current_user.is_authenticated:
+        return jsonify({
+            'authenticated': True, 
+            'username': current_user.username,
+            'user_id': current_user.id
+        })
+    return jsonify({'authenticated': False})
+
+# ══════════════════════════════════════════════════════════════════════
+# WATCHLIST ROUTES
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/api/watchlist', methods=['GET'])
+@login_required
+def get_user_watchlist_api():
+    """Get current user's watchlist with live prices"""
+    try:
+        watchlist = get_user_watchlist(current_user.id)
+        for stock in watchlist:
+            symbol = stock['symbol']
+            try:
+                ticker = yf.Ticker(symbol)
+                data = ticker.info
+                stock['price'] = data.get('currentPrice', 0)
+                stock['change'] = data.get('regularMarketChange', 0)
+                stock['changePercent'] = data.get('regularMarketChangePercent', 0)
+            except:
+                stock['price'] = 0
+                stock['change'] = 0
+                stock['changePercent'] = 0
+        return jsonify(watchlist)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/watchlist/add', methods=['POST'])
+@login_required
+def add_to_watchlist_api():
+    """Add stock to current user's watchlist"""
+    try:
+        data = request.get_json()
+        symbol = data.get('symbol', '').strip()
+        name = data.get('name', '').strip()
+        
+        if not symbol or not name:
+            return jsonify({'success': False, 'message': 'Symbol and name required'}), 400
+        
+        if add_to_watchlist(current_user.id, symbol, name):
+            return jsonify({'success': True, 'message': 'Added to watchlist'})
+        return jsonify({'success': False, 'message': 'Already in watchlist'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/watchlist/remove', methods=['POST'])
+@login_required
+def remove_from_watchlist_api():
+    """Remove stock from current user's watchlist"""
+    try:
+        data = request.get_json()
+        symbol = data.get('symbol', '').strip()
+        
+        if not symbol:
+            return jsonify({'success': False, 'message': 'Symbol required'}), 400
+        
+        remove_from_watchlist(current_user.id, symbol)
+        return jsonify({'success': True, 'message': 'Removed from watchlist'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+# PORTFOLIO ROUTES
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/api/portfolio', methods=['GET'])
+@login_required
+def get_user_portfolio_api():
+    """Get current user's portfolio with current values"""
+    try:
+        portfolio = get_user_portfolio(current_user.id)
+        
+        for holding in portfolio:
+            symbol = holding['symbol']
+            try:
+                ticker = yf.Ticker(symbol)
+                data = ticker.info
+                current_price = data.get('currentPrice', 0)
+                
+                holding['current_price'] = current_price
+                holding['current_value'] = current_price * holding['quantity']
+                holding['invested_value'] = holding['buy_price'] * holding['quantity']
+                holding['profit_loss'] = holding['current_value'] - holding['invested_value']
+                holding['profit_loss_percent'] = (
+                    (holding['profit_loss'] / holding['invested_value'] * 100) 
+                    if holding['invested_value'] > 0 else 0
+                )
+            except Exception as e:
+                holding['current_price'] = 0
+                holding['current_value'] = 0
+                holding['invested_value'] = holding['buy_price'] * holding['quantity']
+                holding['profit_loss'] = 0
+                holding['profit_loss_percent'] = 0
+        
+        return jsonify(portfolio)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/portfolio/add', methods=['POST'])
+@login_required
+def add_to_portfolio_api():
+    """Add stock to current user's portfolio"""
+    try:
+        data = request.get_json()
+        
+        symbol = data.get('symbol', '').strip()
+        name = data.get('name', '').strip()
+        quantity = float(data.get('quantity', 0))
+        buy_price = float(data.get('buy_price', 0))
+        buy_date = data.get('buy_date', '')
+        
+        if not symbol or not name:
+            return jsonify({'success': False, 'message': 'Symbol and name required'}), 400
+        
+        if quantity <= 0 or buy_price <= 0:
+            return jsonify({'success': False, 'message': 'Invalid quantity or price'}), 400
+        
+        holding_id = add_to_portfolio(current_user.id, symbol, name, quantity, buy_price, buy_date)
+        
+        if holding_id:
+            return jsonify({'success': True, 'message': 'Added to portfolio', 'holding_id': holding_id})
+        return jsonify({'success': False, 'message': 'Failed to add to portfolio'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/portfolio/update', methods=['POST'])
+@login_required
+def update_portfolio_api():
+    """Update an existing portfolio holding"""
+    try:
+        data = request.get_json()
+        
+        holding_id = int(data.get('holding_id', 0))
+        quantity = float(data.get('quantity', 0))
+        buy_price = float(data.get('buy_price', 0))
+        
+        if holding_id <= 0:
+            return jsonify({'success': False, 'message': 'Invalid holding ID'}), 400
+        
+        if quantity <= 0 or buy_price <= 0:
+            return jsonify({'success': False, 'message': 'Invalid quantity or price'}), 400
+        
+        if update_portfolio_holding(current_user.id, holding_id, quantity, buy_price):
+            return jsonify({'success': True, 'message': 'Portfolio updated'})
+        return jsonify({'success': False, 'message': 'Failed to update portfolio'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/portfolio/remove', methods=['POST'])
+@login_required
+def remove_from_portfolio_api():
+    """Remove holding from current user's portfolio"""
+    try:
+        data = request.get_json()
+        
+        holding_id = int(data.get('holding_id', 0))
+        
+        if holding_id <= 0:
+            return jsonify({'success': False, 'message': 'Invalid holding ID'}), 400
+        
+        remove_from_portfolio(current_user.id, holding_id)
+        return jsonify({'success': True, 'message': 'Removed from portfolio'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/portfolio/summary', methods=['GET'])
+@login_required  
+def get_portfolio_summary_api():
+    """Get portfolio summary with total invested, current value, and P&L"""
+    try:
+        portfolio = get_user_portfolio(current_user.id)
+        
+        total_invested = 0
+        total_current = 0
+        
+        for holding in portfolio:
+            symbol = holding['symbol']
+            quantity = holding['quantity']
+            buy_price = holding['buy_price']
+            
+            try:
+                ticker = yf.Ticker(symbol)
+                data = ticker.info
+                current_price = data.get('currentPrice', 0)
+            except:
+                current_price = 0
+            
+            total_invested += buy_price * quantity
+            total_current += current_price * quantity
+        
+        total_pl = total_current - total_invested
+        total_pl_percent = (total_pl / total_invested * 100) if total_invested > 0 else 0
+        
+        return jsonify({
+            'total_invested': round(total_invested, 2),
+            'total_current': round(total_current, 2),
+            'total_profit_loss': round(total_pl, 2),
+            'total_profit_loss_percent': round(total_pl_percent, 2),
+            'holdings_count': len(portfolio)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/health')
 def health():

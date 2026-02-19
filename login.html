@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Tracker - Login</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .login-container {
+            background: white;
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            width: 100%;
+            max-width: 400px;
+            animation: slideUp 0.5s ease;
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 0.5rem;
+            text-align: center;
+            font-size: 2rem;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #666;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        
+        input {
+            width: 100%;
+            padding: 0.8rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        button {
+            width: 100%;
+            padding: 1rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .toggle-form {
+            text-align: center;
+            margin-top: 1.5rem;
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .toggle-form a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        .toggle-form a:hover {
+            text-decoration: underline;
+        }
+        
+        .message {
+            margin-top: 1rem;
+            padding: 0.8rem;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.9rem;
+            display: none;
+        }
+        
+        .message.error {
+            background: #fee;
+            color: #c33;
+            border: 1px solid #fcc;
+            display: block;
+        }
+        
+        .message.success {
+            background: #efe;
+            color: #3c3;
+            border: 1px solid #cfc;
+            display: block;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1>📈 Stock Tracker</h1>
+        <p class="subtitle" id="subtitle">Sign in to manage your watchlist</p>
+        
+        <form id="authForm">
+            <div id="emailGroup" class="form-group" style="display:none;">
+                <label for="email">Email</label>
+                <input type="email" id="email" placeholder="you@example.com" autocomplete="email">
+            </div>
+            
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" placeholder="Enter username" required autocomplete="username">
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" placeholder="Enter password" required autocomplete="current-password">
+            </div>
+            
+            <button type="submit" id="submitBtn">
+                <span id="btnText">Sign In</span>
+            </button>
+        </form>
+        
+        <div class="toggle-form">
+            <span id="toggleText">Don't have an account? </span>
+            <a id="toggleLink">Sign Up</a>
+        </div>
+        
+        <div class="message" id="message"></div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin + '/api';
+        let isRegisterMode = false;
+
+        // Toggle between login and register
+        document.getElementById('toggleLink').addEventListener('click', (e) => {
+            e.preventDefault();
+            isRegisterMode = !isRegisterMode;
+            
+            const emailGroup = document.getElementById('emailGroup');
+            const subtitle = document.getElementById('subtitle');
+            const btnText = document.getElementById('btnText');
+            const toggleText = document.getElementById('toggleText');
+            const toggleLink = document.getElementById('toggleLink');
+            
+            if (isRegisterMode) {
+                emailGroup.style.display = 'block';
+                subtitle.textContent = 'Create your account';
+                btnText.textContent = 'Sign Up';
+                toggleText.textContent = 'Already have an account? ';
+                toggleLink.textContent = 'Sign In';
+                document.getElementById('password').setAttribute('autocomplete', 'new-password');
+            } else {
+                emailGroup.style.display = 'none';
+                subtitle.textContent = 'Sign in to manage your watchlist';
+                btnText.textContent = 'Sign In';
+                toggleText.textContent = "Don't have an account? ";
+                toggleLink.textContent = 'Sign Up';
+                document.getElementById('password').setAttribute('autocomplete', 'current-password');
+            }
+            
+            hideMessage();
+        });
+
+        // Handle form submission
+        document.getElementById('authForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const email = document.getElementById('email').value.trim();
+            
+            if (!username || !password) {
+                showMessage('Please fill in all fields', 'error');
+                return;
+            }
+            
+            if (isRegisterMode && !email) {
+                showMessage('Please enter your email', 'error');
+                return;
+            }
+            
+            const endpoint = isRegisterMode ? '/auth/register' : '/auth/login';
+            const payload = isRegisterMode ? 
+                { username, email, password } : 
+                { username, password };
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const btnText = document.getElementById('btnText');
+            
+            // Show loading
+            submitBtn.disabled = true;
+            btnText.innerHTML = '<span class="loading"></span>';
+            
+            try {
+                const response = await fetch(API_URL + endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    credentials: 'include'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    if (isRegisterMode) {
+                        showMessage('Account created successfully! Please sign in.', 'success');
+                        // Switch to login mode
+                        setTimeout(() => {
+                            document.getElementById('toggleLink').click();
+                            document.getElementById('password').value = '';
+                        }, 1500);
+                    } else {
+                        showMessage('Login successful! Redirecting...', 'success');
+                        // Redirect to main app
+                        setTimeout(() => {
+                            window.location.href = '/stock_tracker.html';
+                        }, 1000);
+                    }
+                } else {
+                    showMessage(data.message || 'An error occurred', 'error');
+                }
+            } catch (error) {
+                console.error('Auth error:', error);
+                showMessage('Connection error. Please try again.', 'error');
+            } finally {
+                submitBtn.disabled = false;
+                btnText.textContent = isRegisterMode ? 'Sign Up' : 'Sign In';
+            }
+        });
+
+        function showMessage(text, type) {
+            const message = document.getElementById('message');
+            message.textContent = text;
+            message.className = 'message ' + type;
+        }
+
+        function hideMessage() {
+            const message = document.getElementById('message');
+            message.className = 'message';
+        }
+
+        // Check if already logged in
+        fetch(API_URL + '/auth/check', { credentials: 'include' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.authenticated) {
+                    // Already logged in, redirect to main app
+                    window.location.href = '/stock_tracker.html';
+                }
+            })
+            .catch(err => console.log('Not logged in'));
+    </script>
+</body>
+</html>
