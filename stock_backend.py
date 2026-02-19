@@ -116,7 +116,6 @@ def resolve_bse_code(base_symbol, proxies=None):
 
 
 app = Flask(__name__)
-# Disable response buffering so SSE streams flush immediately to the client
 app.config['PROPAGATE_EXCEPTIONS'] = True
 CORS(app, supports_credentials=True)
 
@@ -2488,7 +2487,6 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
             print(f"  Fetch error: {e}")
             return None
 
-    # --- BSE URLs: AttachLive needs a session, AttachHis works with headers ---
     if 'bseindia.com' in pdf_url:
         bse_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -2500,7 +2498,7 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
         }
         resp = _try_fetch(pdf_url, bse_headers)
 
-        # AttachLive often needs a live BSE session — try establishing one first
+        # AttachLive needs a live BSE session — try establishing one first
         if (resp is None or not resp.ok) and 'AttachLive' in pdf_url:
             print(f"  AttachLive failed directly, trying with BSE session...")
             try:
@@ -2516,9 +2514,7 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
             fallback_url = pdf_url.replace('AttachLive', 'AttachHis')
             print(f"  Trying AttachHis fallback...")
             resp = _try_fetch(fallback_url, bse_headers)
-
     else:
-        # Non-BSE: try with a realistic browser UA and common headers
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/pdf,*/*',
@@ -2544,11 +2540,10 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
     except Exception as e:
         error_msg = str(e).lower()
         if 'invalid pdf header' in error_msg or 'eoferror' in error_msg:
-            # Peek at content to give a better error
             preview = content_bytes[:200].decode('utf-8', errors='replace')
             if '<html' in preview.lower():
                 return '', 'Got HTML instead of PDF (login wall or redirect)'
-            return '', f'Not a valid PDF file'
+            return '', 'Not a valid PDF file'
         return '', f'PDF read error: {str(e)[:120]}'
 
     total_pages = len(reader.pages)
@@ -2580,8 +2575,9 @@ def deepdive_fetch_docs():
     Expects: {docs: [{url, title, type}], proxy_host, proxy_port}
     Streams:  one JSON data line per doc, then {"done": true} sentinel.
     """
-    import json as _json
+    import json as _json, queue, threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from flask import Response
 
     data = request.get_json() or {}
     docs = data.get('docs', [])
@@ -2598,20 +2594,11 @@ def deepdive_fetch_docs():
         doc_type = doc.get('type', '')
         print(f"  [{doc_type}] {title}")
         text, error = extract_text_from_pdf(url, proxies)
-        return idx, {
-            'index': idx,
-            'url': url,
-            'title': title,
-            'type': doc_type,
-            'text': text,
-            'error': error,
-            'length': len(text)
-        }
+        return idx, {'index': idx, 'url': url, 'title': title,
+                     'type': doc_type, 'text': text, 'error': error, 'length': len(text)}
 
     def generate():
-        import queue, threading
         yield b": keep-alive\n\n"
-
         result_q = queue.Queue()
         max_workers = min(5, max(1, len(docs)))
 
@@ -2624,20 +2611,13 @@ def deepdive_fetch_docs():
                     except Exception as e:
                         i = futures[future]
                         doc = docs[i]
-                        result = {
-                            'index': i,
-                            'url': doc.get('url', ''),
-                            'title': doc.get('title', ''),
-                            'type': doc.get('type', ''),
-                            'text': '',
-                            'error': str(e),
-                            'length': 0
-                        }
+                        result = {'index': i, 'url': doc.get('url', ''),
+                                  'title': doc.get('title', ''), 'type': doc.get('type', ''),
+                                  'text': '', 'error': str(e), 'length': 0}
                     result_q.put(result)
-            result_q.put(None)  # sentinel
+            result_q.put(None)
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
+        threading.Thread(target=worker, daemon=True).start()
 
         while True:
             try:
@@ -2650,9 +2630,7 @@ def deepdive_fetch_docs():
 
         yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}\n\n".encode('utf-8')
 
-    from flask import Response
-    response = Response(generate(), mimetype='text/event-stream',
-                        direct_passthrough=True)
+    response = Response(generate(), mimetype='text/event-stream', direct_passthrough=True)
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Connection'] = 'keep-alive'
@@ -2680,8 +2658,6 @@ def deepdive_ask():
         return jsonify({'error': 'No question provided'}), 400
 
     proxies = make_proxies(proxy_host, proxy_port)
-
-    # Limit context to 40k chars — enough for good answers, much faster
     context_trimmed = context[:40000]
 
     print(f"\n[Deep Dive Ask] Question: {question[:100]}")
@@ -2704,11 +2680,11 @@ Document context:
     conversation_text = system_prompt + "\n\n"
     for msg in messages:
         role    = msg.get('role', 'user')
-        content = msg.get('content', '')
+        cnt     = msg.get('content', '')
         if role == 'user':
-            conversation_text += f"User: {content}\n\n"
+            conversation_text += f"User: {cnt}\n\n"
         elif role == 'assistant':
-            conversation_text += f"Assistant: {content}\n\n"
+            conversation_text += f"Assistant: {cnt}\n\n"
     conversation_text += f"User: {question}\n\nAssistant:"
 
     payload = {
@@ -2716,16 +2692,13 @@ Document context:
         'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2048, 'topP': 0.95}
     }
 
-    # Use Gemini streaming endpoint
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse&key={api_key}"
 
     def generate():
         yield b": keep-alive\n\n"
         try:
-            # Retry on rate limit
             for attempt in range(3):
-                r = req.post(api_url, json=payload, timeout=60,
-                             proxies=proxies, stream=True)
+                r = req.post(api_url, json=payload, timeout=60, proxies=proxies, stream=True)
                 if r.status_code == 429:
                     m = re.search(r'retry in ([\d.]+)s', r.text)
                     wait = float(m.group(1)) if m else 5
@@ -2739,7 +2712,6 @@ Document context:
                 yield f"data: {err}\n\n".encode()
                 return
 
-            # Stream chunks as they arrive
             for line in r.iter_lines():
                 if not line:
                     continue

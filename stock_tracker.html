@@ -1171,7 +1171,7 @@
         // ═══════════════════════════════════════════════════════════
         let ddContext = '';
         let ddCompany = '';
-        let ddFetchAbortController = null;  // cancels in-progress fetch-docs stream
+        let ddFetchAbortController = null;
         let ddSymbol = '';
         let ddChatHistory = [];
         let ddDocuments = { annual: [], concalls: [], presentations: [] };
@@ -1390,6 +1390,10 @@
                     return;
                 }
                 
+                // Lock dropdown and checkboxes while reading
+                document.getElementById('ddStockSelect').disabled = true;
+                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = true);
+
                 // Stream documents via SSE to avoid 502 gateway timeouts
                 let successCount = 0;
                 let failCount = 0;
@@ -1398,10 +1402,6 @@
 
                 document.getElementById('ddChatStatus').textContent =
                     `Reading 0 / ${docsToFetch.length} documents...`;
-
-                // Lock dropdown so user can't switch company mid-read
-                document.getElementById('ddStockSelect').disabled = true;
-                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = true);
 
                 ddFetchAbortController = new AbortController();
                 const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
@@ -1417,7 +1417,6 @@
 
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-                // Read the SSE stream line-by-line — each doc arrives as it finishes
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
@@ -1428,7 +1427,7 @@
                     buffer += decoder.decode(value, { stream: true });
 
                     const lines = buffer.split('\n');
-                    buffer = lines.pop(); // keep incomplete trailing line
+                    buffer = lines.pop();
 
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
@@ -1451,8 +1450,11 @@
                     }
                 }
 
-                console.log(`📊 ${successCount}/${docsToFetch.length} documents extracted`);
+                ddFetchAbortController = null;
+                document.getElementById('ddStockSelect').disabled = false;
+                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = false);
 
+                console.log(`📊 ${successCount}/${docsToFetch.length} documents extracted`);
                 document.getElementById('ddChatStatus').textContent =
                     `${successCount} of ${docsToFetch.length} documents ready - ask anything!`;
 
@@ -1464,9 +1466,6 @@
                 if (failCount > 0) statusMsg += ` (${failCount} documents couldn't be processed)`;
                 statusMsg += ` Ask me anything about the company!`;
 
-                ddFetchAbortController = null;
-                document.getElementById('ddStockSelect').disabled = false;
-                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = false);
                 ddAddSystemMessage(statusMsg);
                 
             } catch (error) {
@@ -1699,8 +1698,7 @@
                     if (done) break;
                     buffer += decoder.decode(value, { stream: true });
 
-                    const lines = buffer.split('
-');
+                    const lines = buffer.split('\n');
                     buffer = lines.pop();
 
                     for (const line of lines) {
