@@ -115,6 +115,7 @@ def resolve_bse_code(base_symbol, proxies=None):
     return ''
 
 
+app = Flask(__name__)
 CORS(app)
 
 # Initialize Flask-Login
