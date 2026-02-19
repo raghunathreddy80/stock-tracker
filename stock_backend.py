@@ -27,7 +27,94 @@ from auth import (init_db, create_user, verify_user, get_user_by_id,
 import yfinance as yf
 import requests as req
 
-app = Flask(__name__)
+
+# ── BSE code lookup: package + HTTP fallback ──────────────────────────────────
+def resolve_bse_code(base_symbol, proxies=None):
+    """
+    Resolve BSE numeric scrip code for an NSE symbol.
+    Tries: bse package → fetchComp API → Search API → Msource API
+    Returns string like '532540' or '' if not found.
+    """
+    BSE_HDR = {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept':          'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin':          'https://www.bseindia.com',
+        'Referer':         'https://www.bseindia.com/',
+        'sec-fetch-site':  'same-site',
+        'sec-fetch-mode':  'cors',
+        'sec-fetch-dest':  'empty',
+    }
+
+    # Method 1: bse pip package
+    try:
+        import tempfile, os
+        from bse import BSE as BsePkg
+        tmp = tempfile.mkdtemp()
+        with BsePkg(download_folder=tmp) as bpkg:
+            result = bpkg.lookup(base_symbol)
+            if result and result.get('bse_code'):
+                code = str(result['bse_code'])
+                print(f"  BSE code (pkg): {code}")
+                return code
+    except Exception as e:
+        print(f"  BSE pkg: {e}")
+
+    # Method 2: fetchComp HTTP API
+    try:
+        r = req.get(
+            f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
+            f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
+            f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base_symbol}",
+            headers=BSE_HDR, timeout=10, proxies=proxies)
+        if r.ok:
+            for item in r.json().get('Table', []):
+                sym = (item.get('nsesymbol') or item.get('NSESymbol', '')).upper()
+                if sym == base_symbol:
+                    code = str(item.get('scripcode') or item.get('Scripcode', ''))
+                    if code:
+                        print(f"  BSE code (fetchComp): {code}")
+                        return code
+    except Exception as e:
+        print(f"  BSE fetchComp: {e}")
+
+    # Method 3: BSE Search API
+    try:
+        r = req.get(
+            f"https://api.bseindia.com/BseIndiaAPI/api/Search/w?str={base_symbol}&type=D",
+            headers=BSE_HDR, timeout=8, proxies=proxies)
+        if r.ok:
+            results = r.json()
+            items = results if isinstance(results, list) else results.get('Table', [])
+            for item in items:
+                sym = (item.get('NSESYMBOL') or item.get('nsesymbol', '')).upper()
+                if sym == base_symbol:
+                    code = str(item.get('SCRIP_CD') or item.get('scripcode', ''))
+                    if code:
+                        print(f"  BSE code (Search): {code}")
+                        return code
+    except Exception as e:
+        print(f"  BSE Search: {e}")
+
+    # Method 4: Msource API
+    try:
+        r = req.get(
+            f"https://api.bseindia.com/Msource/1D/getQouteSearch.aspx?Type=EQ&text={base_symbol}&flag=site",
+            headers=BSE_HDR, timeout=8, proxies=proxies)
+        if r.ok:
+            hits = r.json()
+            if isinstance(hits, list) and hits:
+                code = str(hits[0].get('scripcode', ''))
+                if code:
+                    print(f"  BSE code (Msource): {code}")
+                    return code
+    except Exception as e:
+        print(f"  BSE Msource: {e}")
+
+    print(f"  !! Could not resolve BSE code for {base_symbol}")
+    return ''
+
+
 CORS(app)
 
 # Initialize Flask-Login
@@ -96,7 +183,75 @@ def parse_date(s):
     return None
 
 
-# ── routes ────────────────────────────────────────────────────────────────────
+# ── price helper: yfinance + Yahoo Finance JSON fallback ─────────────────────
+def get_price_robust(symbol):
+    """
+    Fetch current price for a symbol. 
+    Try yfinance first, fall back to Yahoo Finance v8 JSON API.
+    Returns dict with price, change, changePercent, volume, previousClose.
+    Returns None on total failure.
+    """
+    # Attempt 1: yfinance history (most reliable method)
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period='2d')
+        if not hist.empty and len(hist) >= 1:
+            price = float(hist['Close'].iloc[-1])
+            prev  = float(hist['Close'].iloc[-2]) if len(hist) >= 2 else price
+            chg   = price - prev
+            chgpc = (chg / prev * 100) if prev else 0
+            vol   = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+            return {'price': round(price,2), 'change': round(chg,2),
+                    'changePercent': round(chgpc,2), 'volume': vol,
+                    'previousClose': round(prev,2)}
+    except Exception as e:
+        print(f"  yfinance history failed for {symbol}: {e}")
+
+    # Attempt 2: Yahoo Finance v8 JSON API (direct HTTP, no yfinance)
+    try:
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+               f"?interval=1d&range=2d")
+        hdrs = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+        r = req.get(url, headers=hdrs, timeout=10)
+        if r.ok:
+            data = r.json()
+            meta = data['chart']['result'][0]['meta']
+            price = meta.get('regularMarketPrice') or meta.get('previousClose')
+            prev  = meta.get('previousClose', price)
+            if price:
+                chg   = price - prev
+                chgpc = (chg / prev * 100) if prev else 0
+                vol   = meta.get('regularMarketVolume', 0)
+                return {'price': round(price,2), 'change': round(chg,2),
+                        'changePercent': round(chgpc,2), 'volume': vol,
+                        'previousClose': round(prev,2)}
+    except Exception as e:
+        print(f"  Yahoo v8 fallback failed for {symbol}: {e}")
+
+    # Attempt 3: Yahoo Finance v7 quote API
+    try:
+        url = (f"https://query2.finance.yahoo.com/v7/finance/quote"
+               f"?symbols={symbol}&fields=regularMarketPrice,regularMarketPreviousClose,regularMarketVolume")
+        hdrs = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+        r = req.get(url, headers=hdrs, timeout=10)
+        if r.ok:
+            result = r.json()['quoteResponse']['result']
+            if result:
+                q = result[0]
+                price = q.get('regularMarketPrice', 0)
+                prev  = q.get('regularMarketPreviousClose', price)
+                chg   = price - prev
+                chgpc = (chg / prev * 100) if prev else 0
+                vol   = q.get('regularMarketVolume', 0)
+                return {'price': round(price,2), 'change': round(chg,2),
+                        'changePercent': round(chgpc,2), 'volume': vol,
+                        'previousClose': round(prev,2)}
+    except Exception as e:
+        print(f"  Yahoo v7 fallback failed for {symbol}: {e}")
+
+    print(f"  All price methods failed for {symbol}")
+    return None
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -179,27 +334,19 @@ def get_user_watchlist_api():
         for stock in watchlist:
             symbol = stock['symbol']
             try:
-                ticker = yf.Ticker(symbol)
-                # Use history for more reliable data
-                hist = ticker.history(period='1d')
-                if not hist.empty:
-                    current_price = hist['Close'].iloc[-1]
-                    previous_close = ticker.info.get('previousClose', current_price)
-                    stock['price'] = round(current_price, 2)
-                    stock['change'] = round(current_price - previous_close, 2)
-                    stock['changePercent'] = round(((current_price - previous_close) / previous_close * 100), 2) if previous_close else 0
-                    stock['volume'] = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+                pdata = get_price_robust(symbol)
+                if pdata:
+                    stock['price']         = pdata['price']
+                    stock['change']        = pdata['change']
+                    stock['changePercent'] = pdata['changePercent']
+                    stock['volume']        = pdata['volume']
                 else:
-                    stock['price'] = 0
-                    stock['change'] = 0
-                    stock['changePercent'] = 0
-                    stock['volume'] = 0
+                    stock['price'] = stock['change'] = stock['changePercent'] = stock['volume'] = 0
+                    stock['priceError'] = 'Price unavailable'
             except Exception as e:
                 print(f"Error fetching price for {symbol}: {e}")
-                stock['price'] = 0
-                stock['change'] = 0
-                stock['changePercent'] = 0
-                stock['volume'] = 0
+                stock['price'] = stock['change'] = stock['changePercent'] = stock['volume'] = 0
+                stock['priceError'] = str(e)
         
         print(f"Returning watchlist with {len(watchlist)} stocks")
         return jsonify(watchlist)
@@ -255,29 +402,20 @@ def get_user_portfolio_api():
         for holding in portfolio:
             symbol = holding['symbol']
             try:
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period='1d')
-                
-                if not hist.empty:
-                    current_price = round(hist['Close'].iloc[-1], 2)
-                else:
-                    current_price = 0
-                
-                holding['current_price'] = current_price
-                holding['current_value'] = current_price * holding['quantity']
-                holding['invested_value'] = holding['buy_price'] * holding['quantity']
-                holding['profit_loss'] = holding['current_value'] - holding['invested_value']
-                holding['profit_loss_percent'] = (
-                    (holding['profit_loss'] / holding['invested_value'] * 100) 
-                    if holding['invested_value'] > 0 else 0
-                )
+                pdata = get_price_robust(symbol)
+                current_price = pdata['price'] if pdata else 0
             except Exception as e:
                 print(f"Error fetching price for {symbol}: {e}")
-                holding['current_price'] = 0
-                holding['current_value'] = 0
-                holding['invested_value'] = holding['buy_price'] * holding['quantity']
-                holding['profit_loss'] = 0
-                holding['profit_loss_percent'] = 0
+                current_price = 0
+
+            holding['current_price'] = current_price
+            holding['current_value'] = current_price * holding['quantity']
+            holding['invested_value'] = holding['buy_price'] * holding['quantity']
+            holding['profit_loss'] = holding['current_value'] - holding['invested_value']
+            holding['profit_loss_percent'] = (
+                (holding['profit_loss'] / holding['invested_value'] * 100)
+                if holding['invested_value'] > 0 else 0
+            )
         
         return jsonify(portfolio)
     except Exception as e:
@@ -366,9 +504,8 @@ def get_portfolio_summary_api():
             buy_price = holding['buy_price']
             
             try:
-                ticker = yf.Ticker(symbol)
-                data = ticker.info
-                current_price = data.get('currentPrice', 0)
+                pdata = get_price_robust(symbol)
+                current_price = pdata['price'] if pdata else 0
             except:
                 current_price = 0
             
@@ -1590,52 +1727,8 @@ def deepdive_alldocs():
 
 
 
-def deepdive_ask():
-    """Send question + context to Claude API and return answer"""
-    data       = request.get_json() or {}
-    system_msg = data.get('system', '')
-    messages   = data.get('messages', [])
-    proxy_host = data.get('proxy_host', '').strip()
-    proxy_port = data.get('proxy_port', '').strip()
 
-    proxies = make_proxies(proxy_host, proxy_port)
 
-    try:
-        claude_headers = {
-            'Content-Type':      'application/json',
-            'anthropic-version': '2023-06-01',
-            'x-api-key':         os.environ.get('ANTHROPIC_API_KEY', ''),
-        }
-
-        # Truncate messages to avoid token limits
-        trimmed_messages = messages[-10:] if len(messages) > 10 else messages
-
-        payload = {
-            'model':      'claude-sonnet-4-5-20250929',
-            'max_tokens': 2048,
-            'system':     system_msg[:90000],   # cap context
-            'messages':   trimmed_messages,
-        }
-
-        resp = req.post(
-            'https://api.anthropic.com/v1/messages',
-            headers=claude_headers,
-            json=payload,
-            timeout=60,
-            proxies=proxies
-        )
-
-        if resp.ok:
-            result = resp.json()
-            answer = result['content'][0]['text']
-            return jsonify({'answer': answer})
-        else:
-            print(f"  Claude API error: {resp.status_code} {resp.text[:300]}")
-            return jsonify({'error': resp.text, 'answer': f'API error {resp.status_code}: {resp.text[:200]}'}), 500
-
-    except Exception as e:
-        print(f"  deepdive ask error: {e}")
-        return jsonify({'error': str(e), 'answer': f'Error: {str(e)}'}), 500
 
 
 @app.route('/api/deepdive/screener', methods=['POST'])
