@@ -1748,6 +1748,43 @@
         // Backend API URL
         // Auto-detect API URL (works both locally and on Render)
         const API_URL = window.location.origin + '/api';
+		
+		// Authentication check - redirect to login if not authenticated
+    (async function() {
+        try {
+            const response = await fetch(API_URL + '/auth/check', { credentials: 'include' });
+            const data = await response.json();
+            
+            if (!data.authenticated) {
+                window.location.href = '/login.html';
+                return;
+            }
+            
+            // Add username and logout button
+            const body = document.body;
+            const userInfo = document.createElement('div');
+            userInfo.style.cssText = 'position:fixed;top:1rem;right:1rem;display:flex;align-items:center;gap:1rem;z-index:9999;background:rgba(0,0,0,0.5);padding:0.5rem 1rem;border-radius:8px;';
+            userInfo.innerHTML = `
+                <span style="color:white;font-weight:500;">👤 ${data.username}</span>
+                <button onclick="logout()" style="padding:0.5rem 1rem;background:#ff4444;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:500;">
+                    Logout
+                </button>
+            `;
+            body.insertBefore(userInfo, body.firstChild);
+        } catch (error) {
+            console.error('Auth check failed:', error);
+            window.location.href = '/login.html';
+        }
+    })();
+    
+    async function logout() {
+        try {
+            await fetch(API_URL + '/auth/logout', { method: 'POST', credentials: 'include' });
+        } catch (error) {
+            console.error('Logout error:', error);
+        }
+        window.location.href = '/login.html';
+    }
 
         // Check if backend is running
         async function checkBackend() {
