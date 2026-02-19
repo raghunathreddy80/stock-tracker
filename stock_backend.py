@@ -1837,44 +1837,91 @@ def deepdive_screener():
                 all_links = docs_sec.find_all('a', href=True)
 
                 # ── Pass 1: concall transcripts ───────────────────────────────
-                SKIP_AUDIO = ['.mp3', '.wav', '.m4a', '.ogg', 'recording', ' rec ',
-                              'audio recording', 'listen', 'soundcloud', 'anchor.fm']
-                for a in all_links:
-                    href  = make_absolute(a['href'])
-                    title = a.get_text(strip=True)
-                    if not href or not title:
-                        continue
-                    if href.endswith('/') and 'screener.in/company' in href:
-                        continue
-                    # Skip LODR announcement HTML pages — want direct PDF transcript links only
-                    if 'corporates/ann.html' in href or 'bseindia.com/corporates' in href:
-                        continue
-                    # Get parent badge text to check for REC label
-                    parent_text = ''
-                    for par in [a.parent, a.parent.parent if a.parent else None]:
-                        if par:
-                            parent_text = par.get_text(separator=' ', strip=True)
+                # Screener structures #documents as <li> rows, each containing:
+                #   a date/quarter span + links labeled "Transcript", "PPT", "REC" etc.
+                # We parse row by row, grab the date from the row, and only take
+                # the link whose text is exactly "Transcript" (the PDF).
+                SKIP_AUDIO_EXT = ('.mp3', '.wav', '.m4a', '.ogg')
+                SKIP_AUDIO_KW  = ['recording', ' rec ', 'audio', 'soundcloud', 'anchor.fm', 'listen']
+
+                # Try row-based parsing first (li elements)
+                rows = docs_sec.find_all('li')
+                if not rows:
+                    # fallback: treat whole section as flat links
+                    rows = [docs_sec]
+
+                for row in rows:
+                    row_text = row.get_text(separator=' ', strip=True)
+                    # Find all anchors in this row
+                    row_links = row.find_all('a', href=True)
+                    transcript_link = None
+                    for a in row_links:
+                        href  = make_absolute(a['href'])
+                        label = a.get_text(strip=True).lower()
+                        href_lo = href.lower()
+                        # Must be labeled exactly "transcript" OR href contains transcript keyword
+                        is_transcript = (label == 'transcript' or
+                                         'transcript' in label or
+                                         'transcript' in href_lo)
+                        # Must NOT be audio
+                        is_audio = (any(href_lo.endswith(ext) for ext in SKIP_AUDIO_EXT) or
+                                    any(kw in (label + ' ' + href_lo) for kw in SKIP_AUDIO_KW) or
+                                    'corporates/ann.html' in href_lo)
+                        if is_transcript and not is_audio:
+                            transcript_link = (href, a.get_text(strip=True))
                             break
-                    # Skip anything that looks like an audio recording
-                    combined_lo = (title + ' ' + href + ' ' + parent_text).lower()
-                    if any(kw in combined_lo for kw in SKIP_AUDIO):
+
+                    if not transcript_link:
                         continue
-                    # Must match transcript keywords in title/href
-                    text_lo = (title + ' ' + href).lower()
-                    if any(kw in text_lo for kw in CONCALL_KWS):
-                        date_m   = _re.search(r'(\w+ \d{4}|\d{2}[-/]\d{2}[-/]\d{4}|\d{4}-\d{2}-\d{2})', parent_text)
-                        yr_m     = _re.search(r'(\d{4})', parent_text)
-                        quarter  = quarter_from_title(parent_text) or quarter_from_title(title)
-                        date_str = date_m.group(1) if date_m else (yr_m.group(1) if yr_m else '')
-                        concalls.append({
-                            'title':   title,
-                            'url':     href,
-                            'quarter': quarter,
-                            'date':    date_str,
-                            'source':  'Screener',
-                        })
-                        if len(concalls) >= 5:
-                            break
+
+                    href, link_label = transcript_link
+                    # Extract date from row text — Screener shows "Jan 2026", "Nov 2025" etc.
+                    date_m  = _re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s,]+(\d{4})', row_text)
+                    date_str = f"{date_m.group(1)} {date_m.group(2)}" if date_m else ''
+                    quarter  = quarter_from_title(row_text) or date_str
+
+                    print(f"    Transcript: {date_str} → {href[:80]}")
+                    concalls.append({
+                        'title':   date_str or link_label,
+                        'url':     href,
+                        'quarter': quarter,
+                        'date':    date_str,
+                        'source':  'Screener',
+                    })
+                    if len(concalls) >= 5:
+                        break
+
+                # Fallback: flat link scan if row-based found nothing
+                if not concalls:
+                    SKIP_AUDIO_ALL = SKIP_AUDIO_EXT + tuple(SKIP_AUDIO_KW) + ('corporates/ann.html',)
+                    for a in all_links:
+                        href  = make_absolute(a['href'])
+                        title = a.get_text(strip=True)
+                        if not href or not title:
+                            continue
+                        if href.endswith('/') and 'screener.in/company' in href:
+                            continue
+                        combined_lo = (title + ' ' + href).lower()
+                        if any(kw in combined_lo for kw in SKIP_AUDIO_ALL):
+                            continue
+                        if 'transcript' in combined_lo:
+                            parent_text = ''
+                            for par in [a.parent, a.parent.parent if a.parent else None]:
+                                if par:
+                                    parent_text = par.get_text(separator=' ', strip=True)
+                                    break
+                            date_m   = _re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s,]+(\d{4})', parent_text)
+                            date_str = f"{date_m.group(1)} {date_m.group(2)}" if date_m else ''
+                            quarter  = quarter_from_title(parent_text) or date_str
+                            concalls.append({
+                                'title':   date_str or title,
+                                'url':     href,
+                                'quarter': quarter,
+                                'date':    date_str,
+                                'source':  'Screener',
+                            })
+                            if len(concalls) >= 5:
+                                break
 
                 # ── Pass 2: investor presentation (first match only) ───────────
                 # Screener shows document type as a badge in the parent <li>
