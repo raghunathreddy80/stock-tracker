@@ -1837,6 +1837,8 @@ def deepdive_screener():
                 all_links = docs_sec.find_all('a', href=True)
 
                 # ── Pass 1: concall transcripts ───────────────────────────────
+                SKIP_AUDIO = ['.mp3', '.wav', '.m4a', '.ogg', 'recording', ' rec ',
+                              'audio recording', 'listen', 'soundcloud', 'anchor.fm']
                 for a in all_links:
                     href  = make_absolute(a['href'])
                     title = a.get_text(strip=True)
@@ -1844,18 +1846,22 @@ def deepdive_screener():
                         continue
                     if href.endswith('/') and 'screener.in/company' in href:
                         continue
-                    # Skip LODR announcement HTML pages — we want direct PDF transcript links only
+                    # Skip LODR announcement HTML pages — want direct PDF transcript links only
                     if 'corporates/ann.html' in href or 'bseindia.com/corporates' in href:
                         continue
-                    # Only match on title/href — not parent text, to avoid false positives
+                    # Get parent badge text to check for REC label
+                    parent_text = ''
+                    for par in [a.parent, a.parent.parent if a.parent else None]:
+                        if par:
+                            parent_text = par.get_text(separator=' ', strip=True)
+                            break
+                    # Skip anything that looks like an audio recording
+                    combined_lo = (title + ' ' + href + ' ' + parent_text).lower()
+                    if any(kw in combined_lo for kw in SKIP_AUDIO):
+                        continue
+                    # Must match transcript keywords in title/href
                     text_lo = (title + ' ' + href).lower()
-                    if any(kw in text_lo for kw in CONCALL_KWS) and 'recording' not in text_lo:
-                        # Try parent for date/quarter context only
-                        parent_text = ''
-                        for par in [a.parent, a.parent.parent if a.parent else None]:
-                            if par:
-                                parent_text = par.get_text(separator=' ', strip=True)
-                                break
+                    if any(kw in text_lo for kw in CONCALL_KWS):
                         date_m   = _re.search(r'(\w+ \d{4}|\d{2}[-/]\d{2}[-/]\d{4}|\d{4}-\d{2}-\d{2})', parent_text)
                         yr_m     = _re.search(r'(\d{4})', parent_text)
                         quarter  = quarter_from_title(parent_text) or quarter_from_title(title)
