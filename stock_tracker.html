@@ -2127,7 +2127,10 @@
                 return;
             }
             
-            const totalPortfolioValue = portfolio.reduce((sum, stock) => sum + stock.totalValue, 0);
+            const totalPortfolioValue = portfolio.reduce((sum, stock) => {
+                const cv = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
+                return sum + cv;
+            }, 0);
             
             tbody.innerHTML = portfolio.map(stock => {
                 const currentValue = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
@@ -2136,7 +2139,7 @@
                 const profitLossPercent = investedValue > 0 ? (profitLoss / investedValue * 100) : 0;
                 const profitLossClass = profitLoss >= 0 ? 'positive' : 'negative';
                 
-                const percentage = totalPortfolioValue > 0 ? (currentValue / totalPortfolioValue * 100) : 0;
+                const portfolioPct = totalPortfolioValue > 0 ? (currentValue / totalPortfolioValue * 100) : 0;
                 return `
                     <tr>
                         <td>
@@ -2146,9 +2149,12 @@
                         <td class="price">₹${(stock.current_price || stock.price || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                         <td>${stock.quantity || 0}</td>
                         <td class="price">₹${currentValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                        <td class="${profitLossClass}">
-                            ₹${profitLoss.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                            (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
+                        <td>
+                            <div>${portfolioPct.toFixed(2)}%</div>
+                            <div class="${profitLossClass}" style="font-size:0.8rem;">
+                                P&L: ${profitLoss >= 0 ? '+' : ''}₹${profitLoss.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                                (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
+                            </div>
                         </td>
                         <td>
                             <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromPortfolio(${stock.id})">Remove</button>
