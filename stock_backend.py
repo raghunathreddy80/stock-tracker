@@ -2552,27 +2552,47 @@ def deepdive_fetch_docs():
         
         proxies = make_proxies(proxy_host, proxy_port)
         
-        print(f"\n[Fetch Docs] Processing {len(docs)} documents")
+        print(f"\n[Fetch Docs] Processing {len(docs)} documents concurrently")
         
-        results = []
-        for doc in docs:
+        def fetch_one(doc):
             url = doc.get('url', '')
             title = doc.get('title', '')
             doc_type = doc.get('type', '')
-            
             print(f"\n  [{doc_type}] {title}")
-            
-            # Extract text from PDF
             text, error = extract_text_from_pdf(url, proxies)
-            
-            results.append({
+            return {
                 'url': url,
                 'title': title,
                 'type': doc_type,
                 'text': text,
                 'error': error,
                 'length': len(text)
-            })
+            }
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # Use up to 5 parallel workers to avoid overwhelming external servers
+        max_workers = min(5, len(docs))
+        results_map = {}
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {executor.submit(fetch_one, doc): i for i, doc in enumerate(docs)}
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                try:
+                    results_map[idx] = future.result()
+                except Exception as e:
+                    doc = docs[idx]
+                    results_map[idx] = {
+                        'url': doc.get('url', ''),
+                        'title': doc.get('title', ''),
+                        'type': doc.get('type', ''),
+                        'text': '',
+                        'error': str(e),
+                        'length': 0
+                    }
+        
+        # Return results in original order
+        results = [results_map[i] for i in range(len(docs))]
         
         return jsonify({'docs': results})
         

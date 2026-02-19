@@ -1385,20 +1385,32 @@
                 
                 document.getElementById('ddChatStatus').textContent = `Reading ${docsToFetch.length} documents...`;
                 
-                // Fetch document text
-                const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        docs: docsToFetch,
-                        proxy_host: proxyHost,
-                        proxy_port: proxyPort
-                    })
-                });
+                // Fetch documents in batches of 5 to avoid 502 gateway timeouts
+                const BATCH_SIZE = 5;
+                const allDocResults = [];
+                for (let i = 0; i < docsToFetch.length; i += BATCH_SIZE) {
+                    const batch = docsToFetch.slice(i, i + BATCH_SIZE);
+                    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+                    const totalBatches = Math.ceil(docsToFetch.length / BATCH_SIZE);
+                    document.getElementById('ddChatStatus').textContent =
+                        `Reading documents... (batch ${batchNum}/${totalBatches})`;
+                    
+                    const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            docs: batch,
+                            proxy_host: proxyHost,
+                            proxy_port: proxyPort
+                        })
+                    });
+                    
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const batchData = await resp.json();
+                    allDocResults.push(...(batchData.docs || []));
+                }
                 
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                
-                const data = await resp.json();
+                const data = { docs: allDocResults };
                 console.log('Fetched documents:', data);
                 
                 // Build context from document text
