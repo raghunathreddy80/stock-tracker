@@ -1443,12 +1443,24 @@
             
             if (concalls.length > 0) {
                 concalls.forEach((doc, idx) => {
+                    // Use quarter label if available, otherwise derive from date or title
+                    let label = (doc.quarter || '').trim();
+                    if (!label && doc.date) {
+                        // Format date as "Mon YYYY" e.g. "Feb 2026"
+                        const d = new Date(doc.date);
+                        if (!isNaN(d)) {
+                            label = d.toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+                        } else {
+                            label = doc.date;
+                        }
+                    }
+                    if (!label) label = `Transcript ${idx + 1}`;
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
                             <input type="checkbox" class="doc-checkbox concall-checkbox" data-type="concall" data-index="${idx}" checked style="margin-right:0.5rem;">
                             <span class="dd-source-icon">🎙️</span>
                             <div style="flex:1;min-width:0;">
-                                <div class="dd-source-name">${doc.quarter}</div>
+                                <div class="dd-source-name">${label}</div>
                                 <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.2rem;">
                                     ${doc.date}
                                 </div>
@@ -1481,14 +1493,17 @@
 
             if (presentations.length > 0) {
                 presentations.forEach((doc, idx) => {
+                    // Shorten long BSE announcement titles to a clean label
+                    let presTitle = 'Investor Presentation';
+                    if (doc.date) presTitle += ` – ${doc.date}`;
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
                             <input type="checkbox" class="doc-checkbox presentation-checkbox" data-type="presentation" data-index="${idx}" checked style="margin-right:0.5rem;">
                             <span class="dd-source-icon">📊</span>
                             <div style="flex:1;min-width:0;">
-                                <div class="dd-source-name">${doc.title}</div>
+                                <div class="dd-source-name">${presTitle}</div>
                                 <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:0.2rem;">
-                                    ${doc.date} · Source: ${doc.source}
+                                    Source: ${doc.source}
                                 </div>
                             </div>
                             <div style="display:flex;gap:0.3rem;align-items:center;">
