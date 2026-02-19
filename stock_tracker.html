@@ -1171,7 +1171,6 @@
         // ═══════════════════════════════════════════════════════════
         let ddContext = '';
         let ddCompany = '';
-        let ddFetchAbortController = null;
         let ddSymbol = '';
         let ddChatHistory = [];
         let ddDocuments = { annual: [], concalls: [], presentations: [] };
@@ -1211,12 +1210,6 @@
             document.getElementById('ddSendBtn').disabled = true;
             document.getElementById('ddQuestion').placeholder = 'Select documents to read first...';
             
-            // Cancel any in-progress document fetch stream
-            if (ddFetchAbortController) {
-                ddFetchAbortController.abort();
-                ddFetchAbortController = null;
-            }
-
             // Clear chat completely
             ddContext = '';
             ddChatHistory = [];
@@ -1390,88 +1383,66 @@
                     return;
                 }
                 
-                // Lock dropdown and checkboxes while reading
-                document.getElementById('ddStockSelect').disabled = true;
-                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = true);
-
-                // Stream documents via SSE to avoid 502 gateway timeouts
-                let successCount = 0;
-                let failCount = 0;
-                let receivedCount = 0;
-                ddContext = `Company: ${ddCompany}\n\n`;
-
-                document.getElementById('ddChatStatus').textContent =
-                    `Reading 0 / ${docsToFetch.length} documents...`;
-
-                ddFetchAbortController = new AbortController();
+                document.getElementById('ddChatStatus').textContent = `Reading ${docsToFetch.length} documents...`;
+                
+                // Fetch document text
                 const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    signal: ddFetchAbortController.signal,
                     body: JSON.stringify({
                         docs: docsToFetch,
                         proxy_host: proxyHost,
                         proxy_port: proxyPort
                     })
                 });
-
+                
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-                const reader = resp.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop();
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) continue;
-                        let parsed;
-                        try { parsed = JSON.parse(line.slice(6)); } catch { continue; }
-                        if (parsed.done) continue;
-
-                        receivedCount++;
-                        document.getElementById('ddChatStatus').textContent =
-                            `Reading ${receivedCount} / ${docsToFetch.length} documents...`;
-
-                        if (parsed.text && parsed.text.length > 100) {
-                            ddContext += `\n=== ${parsed.title} ===\n${parsed.text}\n`;
-                            successCount++;
-                            console.log(`✓ ${parsed.title} (${parsed.text.length} chars)`);
-                        } else {
-                            failCount++;
-                            console.error(`✗ ${parsed.title}`, parsed.error || 'No text');
-                        }
+                
+                const data = await resp.json();
+                console.log('Fetched documents:', data);
+                
+                // Build context from document text
+                ddContext = `Company: ${ddCompany}\n\n`;
+                
+                let successCount = 0;
+                let failCount = 0;
+                let failedDocs = [];
+                
+                data.docs.forEach(doc => {
+                    if (doc.text && doc.text.length > 100) {
+                        ddContext += `\n=== ${doc.title} ===\n${doc.text}\n`;
+                        successCount++;
+                        console.log(`✓ Extracted: ${doc.title} (${doc.text.length} chars)`);
+                    } else {
+                        failCount++;
+                        failedDocs.push(`${doc.title} - ${doc.error || 'Unknown error'}`);
+                        console.error(`✗ Failed: ${doc.title}`, doc.error || 'No text extracted');
                     }
+                });
+                
+                console.log(`\n📊 Summary: ${successCount}/${data.docs.length} documents extracted successfully`);
+                if (failedDocs.length > 0) {
+                    console.error('Failed documents:', failedDocs);
                 }
-
-                ddFetchAbortController = null;
-                document.getElementById('ddStockSelect').disabled = false;
-                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = false);
-
-                console.log(`📊 ${successCount}/${docsToFetch.length} documents extracted`);
-                document.getElementById('ddChatStatus').textContent =
-                    `${successCount} of ${docsToFetch.length} documents ready - ask anything!`;
-
+                
+                document.getElementById('ddChatStatus').textContent = 
+                    `${successCount} of ${data.docs.length} documents ready - ask anything!`;
+                
+                // Enable AI input
                 document.getElementById('ddQuestion').disabled = false;
                 document.getElementById('ddSendBtn').disabled = false;
-                document.getElementById('ddQuestion').placeholder = "Ask anything about this company's financials, strategy, risks...";
-
-                let statusMsg = `I've read **${successCount} of ${docsToFetch.length} documents** for **${ddCompany}**.`;
-                if (failCount > 0) statusMsg += ` (${failCount} documents couldn't be processed)`;
+                document.getElementById('ddQuestion').placeholder = 'Ask anything about this company\'s financials, strategy, risks...';
+                
+                let statusMsg = `I've read **${successCount} of ${data.docs.length} documents** for **${ddCompany}**.`;
+                if (failCount > 0) {
+                    statusMsg += ` (${failCount} documents couldn't be processed)`;
+                }
                 statusMsg += ` Ask me anything about the company!`;
-
+                
                 ddAddSystemMessage(statusMsg);
                 
             } catch (error) {
                 console.error('Fetch docs error:', error);
-                document.getElementById('ddStockSelect').disabled = false;
-                document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => cb.disabled = false);
                 document.getElementById('ddChatStatus').textContent = `Error fetching documents: ${error.message}`;
                 ddAddSystemMessage(`Could not fetch document text. I can still answer questions using my general knowledge.`);
             }
@@ -1663,7 +1634,7 @@
                     body: JSON.stringify({
                         question: question,
                         context: ddContext,
-                        messages: ddChatHistory.slice(0, -1),
+                        messages: ddChatHistory.slice(0, -1), // Exclude current question
                         proxy_host: proxyHost,
                         proxy_port: proxyPort
                     })
@@ -1671,58 +1642,15 @@
 
                 ddRemoveTyping(typingId);
 
-                if (!resp.ok) {
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const answer = data.answer || 'No response received.';
+                    ddAppendMessage('ai', answer);
+                    ddChatHistory.push({ role: 'assistant', content: answer });
+                } else {
                     const errorData = await resp.json().catch(() => ({}));
                     ddAppendMessage('ai', `⚠️ Error: ${errorData.error || 'Unknown error'}`);
-                    btn.disabled = false;
-                    return;
                 }
-
-                // Stream the response word-by-word
-                let fullAnswer = '';
-                const bubbleId = 'dd-streaming-' + Date.now();
-                const msgs = document.getElementById('ddMessages');
-                const welcome = msgs.querySelector('.dd-welcome');
-                if (welcome) welcome.remove();
-                const div = document.createElement('div');
-                div.className = 'dd-message ai';
-                div.innerHTML = `<div class="dd-avatar">🤖</div><div class="dd-bubble" id="${bubbleId}"></div>`;
-                msgs.appendChild(div);
-
-                const reader = resp.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop();
-
-                    for (const line of lines) {
-                        if (!line.startsWith('data: ')) continue;
-                        let parsed;
-                        try { parsed = JSON.parse(line.slice(6)); } catch { continue; }
-
-                        if (parsed.error) {
-                            document.getElementById(bubbleId).innerHTML = `⚠️ ${parsed.error}`;
-                            break;
-                        }
-                        if (parsed.done) break;
-                        if (parsed.chunk) {
-                            fullAnswer += parsed.chunk;
-                            document.getElementById(bubbleId).innerHTML = ddFormatText(fullAnswer);
-                            msgs.scrollTop = msgs.scrollHeight;
-                        }
-                    }
-                }
-
-                if (fullAnswer) {
-                    ddChatHistory.push({ role: 'assistant', content: fullAnswer });
-                }
-
             } catch(e) {
                 ddRemoveTyping(typingId);
                 ddAppendMessage('ai', `⚠️ Connection error: ${e.message}`);

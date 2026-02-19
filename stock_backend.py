@@ -116,8 +116,7 @@ def resolve_bse_code(base_symbol, proxies=None):
 
 
 app = Flask(__name__)
-app.config['PROPAGATE_EXCEPTIONS'] = True
-CORS(app, supports_credentials=True)
+CORS(app)
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -2471,279 +2470,255 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
     Returns: (text_content, error_msg)
     """
     try:
-        import pypdf
-    except ImportError:
-        print("  Installing pypdf...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pypdf', '--break-system-packages', '-q'])
-        import pypdf
-
-    print(f"  Fetching PDF: {pdf_url[:80]}...")
-
-    def _try_fetch(url, headers, timeout=30):
+        # Install pypdf if needed
         try:
-            r = req.get(url, headers=headers, timeout=timeout, proxies=proxies, stream=True)
-            return r
+            import pypdf
+        except ImportError:
+            print("  Installing pypdf...")
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pypdf', '--break-system-packages', '-q'])
+            import pypdf
+        
+        print(f"  Fetching PDF: {pdf_url[:80]}...")
+        
+        # Fetch PDF - use BSE headers if it's a BSE URL
+        if 'bseindia.com' in pdf_url:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Origin': 'https://www.bseindia.com',
+                'Referer': 'https://www.bseindia.com/',
+                'sec-fetch-site': 'same-site',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-dest': 'empty',
+            }
+        else:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        
+        resp = req.get(pdf_url, headers=headers, timeout=30, proxies=proxies, stream=True)
+        
+        if not resp.ok:
+            return '', f'HTTP {resp.status_code}'
+        
+        print(f"  Downloaded {len(resp.content)} bytes, extracting text...")
+        
+        # Extract text from PDF
+        import io
+        pdf_file = io.BytesIO(resp.content)
+        
+        try:
+            reader = pypdf.PdfReader(pdf_file)
         except Exception as e:
-            print(f"  Fetch error: {e}")
-            return None
-
-    if 'bseindia.com' in pdf_url:
-        bse_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Origin': 'https://www.bseindia.com',
-            'Referer': 'https://www.bseindia.com/',
-            'sec-fetch-site': 'same-site',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-dest': 'empty',
-        }
-        resp = _try_fetch(pdf_url, bse_headers)
-
-        # AttachLive needs a live BSE session — try establishing one first
-        if (resp is None or not resp.ok) and 'AttachLive' in pdf_url:
-            print(f"  AttachLive failed directly, trying with BSE session...")
+            error_msg = str(e)
+            # Check if it's not a PDF
+            if 'invalid pdf header' in error_msg.lower():
+                return '', 'Not a PDF file (might be HTML, audio, or other format)'
+            return '', f'PDF read error: {error_msg[:100]}'
+        
+        total_pages = len(reader.pages)
+        pages_to_read = min(total_pages, max_pages)
+        
+        text_parts = []
+        for i in range(pages_to_read):
             try:
-                sess = req.Session()
-                sess.get('https://www.bseindia.com', headers=bse_headers, timeout=10, proxies=proxies)
-                resp = sess.get(pdf_url, headers=bse_headers, timeout=30, proxies=proxies, stream=True)
-            except Exception as e:
-                print(f"  BSE session fetch error: {e}")
-                return '', f'BSE session fetch failed: {e}'
-
-        # Try AttachHis fallback if AttachLive still fails
-        if (resp is None or not resp.ok) and 'AttachLive' in pdf_url:
-            fallback_url = pdf_url.replace('AttachLive', 'AttachHis')
-            print(f"  Trying AttachHis fallback...")
-            resp = _try_fetch(fallback_url, bse_headers)
-    else:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/pdf,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        resp = _try_fetch(pdf_url, headers, timeout=45)
-
-    if resp is None:
-        return '', 'Request failed (timeout or connection error)'
-    if not resp.ok:
-        return '', f'HTTP {resp.status_code}'
-
-    try:
-        content_bytes = resp.content
+                page = reader.pages[i]
+                text = page.extract_text()
+                if text:
+                    text_parts.append(text)
+            except:
+                pass
+        
+        full_text = '\n\n'.join(text_parts)
+        print(f"  Extracted {len(full_text)} characters from {pages_to_read}/{total_pages} pages")
+        
+        return full_text, None
+        
     except Exception as e:
-        return '', f'Failed to read response body: {e}'
-
-    print(f"  Downloaded {len(content_bytes)} bytes, extracting text...")
-
-    import io
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(content_bytes))
-    except Exception as e:
-        error_msg = str(e).lower()
-        if 'invalid pdf header' in error_msg or 'eoferror' in error_msg:
-            preview = content_bytes[:200].decode('utf-8', errors='replace')
-            if '<html' in preview.lower():
-                return '', 'Got HTML instead of PDF (login wall or redirect)'
-            return '', 'Not a valid PDF file'
-        return '', f'PDF read error: {str(e)[:120]}'
-
-    total_pages = len(reader.pages)
-    pages_to_read = min(total_pages, max_pages)
-
-    text_parts = []
-    for i in range(pages_to_read):
-        try:
-            text = reader.pages[i].extract_text()
-            if text and text.strip():
-                text_parts.append(text)
-        except Exception as e:
-            print(f"  Page {i} extract error: {e}")
-
-    full_text = '\n\n'.join(text_parts)
-    print(f"  Extracted {len(full_text)} characters from {pages_to_read}/{total_pages} pages")
-
-    if not full_text.strip():
-        return '', f'Image-based PDF — no extractable text (scanned document, {total_pages} pages)'
-
-    return full_text, None
+        import traceback
+        traceback.print_exc()
+        return '', str(e)
 
 
 @app.route('/api/deepdive/fetch-docs', methods=['POST'])
 def deepdive_fetch_docs():
     """
-    Fetch and extract text from documents using Server-Sent Events (SSE).
-    Streams each document result as it completes, avoiding gateway timeouts.
+    Fetch and extract text from documents.
     Expects: {docs: [{url, title, type}], proxy_host, proxy_port}
-    Streams:  one JSON data line per doc, then {"done": true} sentinel.
+    Returns: {docs: [{url, title, type, text, error}]}
     """
-    import json as _json, queue, threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from flask import Response
-
-    data = request.get_json() or {}
-    docs = data.get('docs', [])
-    proxy_host = data.get('proxy_host', '').strip()
-    proxy_port = data.get('proxy_port', '').strip()
-    proxies = make_proxies(proxy_host, proxy_port)
-
-    print(f"\n[Fetch Docs SSE] Streaming {len(docs)} documents")
-
-    def fetch_one(item):
-        idx, doc = item
-        url = doc.get('url', '')
-        title = doc.get('title', '')
-        doc_type = doc.get('type', '')
-        print(f"  [{doc_type}] {title}")
-        text, error = extract_text_from_pdf(url, proxies)
-        return idx, {'index': idx, 'url': url, 'title': title,
-                     'type': doc_type, 'text': text, 'error': error, 'length': len(text)}
-
-    def generate():
-        yield b": keep-alive\n\n"
-        result_q = queue.Queue()
-        max_workers = min(5, max(1, len(docs)))
-
-        def worker():
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(fetch_one, (i, doc)): i for i, doc in enumerate(docs)}
-                for future in as_completed(futures):
-                    try:
-                        _, result = future.result()
-                    except Exception as e:
-                        i = futures[future]
-                        doc = docs[i]
-                        result = {'index': i, 'url': doc.get('url', ''),
-                                  'title': doc.get('title', ''), 'type': doc.get('type', ''),
-                                  'text': '', 'error': str(e), 'length': 0}
-                    result_q.put(result)
-            result_q.put(None)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-        while True:
-            try:
-                result = result_q.get(timeout=10)
-                if result is None:
-                    break
-                yield f"data: {_json.dumps(result)}\n\n".encode('utf-8')
-            except queue.Empty:
-                yield b": heartbeat\n\n"
-
-        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}\n\n".encode('utf-8')
-
-    response = Response(generate(), mimetype='text/event-stream', direct_passthrough=True)
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Connection'] = 'keep-alive'
-    return response
+    try:
+        data = request.get_json() or {}
+        docs = data.get('docs', [])
+        proxy_host = data.get('proxy_host', '').strip()
+        proxy_port = data.get('proxy_port', '').strip()
+        
+        proxies = make_proxies(proxy_host, proxy_port)
+        
+        print(f"\n[Fetch Docs] Processing {len(docs)} documents")
+        
+        results = []
+        for doc in docs:
+            url = doc.get('url', '')
+            title = doc.get('title', '')
+            doc_type = doc.get('type', '')
+            
+            print(f"\n  [{doc_type}] {title}")
+            
+            # Extract text from PDF
+            text, error = extract_text_from_pdf(url, proxies)
+            
+            results.append({
+                'url': url,
+                'title': title,
+                'type': doc_type,
+                'text': text,
+                'error': error,
+                'length': len(text)
+            })
+        
+        return jsonify({'docs': results})
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'docs': []}), 500
 
 
 @app.route('/api/deepdive/ask', methods=['POST'])
 def deepdive_ask():
     """
-    Ask Gemini a question with document context, streaming the response via SSE.
+    Ask ChatGPT a question with document context.
     Expects: {question, context, messages, proxy_host, proxy_port}
-    Streams:  data: {"chunk": "..."} lines, then data: {"done": true}
+    Returns: {answer}
     """
-    import json as _json, re, time
-    from flask import Response
-
-    data = request.get_json() or {}
-    question = data.get('question', '').strip()
-    context  = data.get('context', '')
-    messages = data.get('messages', [])
-    proxy_host = data.get('proxy_host', '').strip()
-    proxy_port = data.get('proxy_port', '').strip()
-
-    if not question:
-        return jsonify({'error': 'No question provided'}), 400
-
-    proxies = make_proxies(proxy_host, proxy_port)
-    context_trimmed = context[:40000]
-
-    print(f"\n[Deep Dive Ask] Question: {question[:100]}")
-    print(f"  Context: {len(context)} chars (sending {len(context_trimmed)})")
-    print(f"  Chat history: {len(messages)} messages")
-
-    api_key = os.environ.get('GEMINI_API_KEY', '').strip()
-    if not api_key:
-        return jsonify({'error': 'GEMINI_API_KEY not set', 'answer': ''}), 500
-
-    system_prompt = """You are a financial analysis AI assistant with access to company documents including annual reports, earnings call transcripts, and investor presentations.
+    try:
+        data = request.get_json() or {}
+        question = data.get('question', '').strip()
+        context = data.get('context', '')  # Document text
+        messages = data.get('messages', [])  # Chat history
+        proxy_host = data.get('proxy_host', '').strip()
+        proxy_port = data.get('proxy_port', '').strip()
+        
+        if not question:
+            return jsonify({'error': 'No question provided'}), 400
+        
+        proxies = make_proxies(proxy_host, proxy_port)
+        
+        print(f"\n[Deep Dive Ask] Question: {question[:100]}")
+        print(f"  Context length: {len(context)} chars")
+        print(f"  Chat history: {len(messages)} messages")
+        
+        # Build system prompt with context
+        system_prompt = """You are a financial analysis AI assistant. You have access to company documents including annual reports, earnings call transcripts, and investor presentations.
 
 Answer questions based on the provided documents. Be specific and cite which document you're referencing. If the information is not in the documents, say so clearly.
 
-Use a professional but conversational tone. Use **bold** for key metrics and numbers.
+Use a professional but conversational tone. Format your responses with:
+- **Bold** for key metrics and numbers
+- Bullet points for lists
+- Clear section headers when appropriate
 
 Document context:
-""" + context_trimmed
-
-    conversation_text = system_prompt + "\n\n"
-    for msg in messages:
-        role    = msg.get('role', 'user')
-        cnt     = msg.get('content', '')
-        if role == 'user':
-            conversation_text += f"User: {cnt}\n\n"
-        elif role == 'assistant':
-            conversation_text += f"Assistant: {cnt}\n\n"
-    conversation_text += f"User: {question}\n\nAssistant:"
-
-    payload = {
-        'contents': [{'parts': [{'text': conversation_text}]}],
-        'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2048, 'topP': 0.95}
-    }
-
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse&key={api_key}"
-
-    def generate():
-        yield b": keep-alive\n\n"
+""" + context[:100000]  # Gemini has 1M token context window!
+        
+        # Get API key
+        api_key = os.environ.get('GEMINI_API_KEY', '').strip()
+        
+        if not api_key:
+            return jsonify({'error': 'GEMINI_API_KEY environment variable not set. Get free key at https://aistudio.google.com/apikey', 'answer': ''}), 500
+        
+        print(f"  Gemini API key: {api_key[:20]}...{api_key[-10:]}")
+        
+        # Call Google Gemini API (using v1beta)
+        # Using gemini-2.5-flash-lite for better free tier limits
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
+        
+        # Build messages - Gemini uses different format
+        # Combine system prompt and chat history
+        conversation_text = system_prompt + "\n\n"
+        
+        # Add chat history
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if role == 'user':
+                conversation_text += f"User: {content}\n\n"
+            elif role == 'assistant':
+                conversation_text += f"Assistant: {content}\n\n"
+        
+        # Add current question
+        conversation_text += f"User: {question}\n\nAssistant:"
+        
+        payload = {
+            'contents': [{
+                'parts': [{
+                    'text': conversation_text
+                }]
+            }],
+            'generationConfig': {
+                'temperature': 0.7,
+                'maxOutputTokens': 8192,
+                'topP': 0.95,
+            }
+        }
+        
+        print(f"  Calling Gemini API (gemini-2.5-flash-lite)...")
+        
+        # Retry logic for rate limits
+        max_retries = 3
+        for attempt in range(max_retries):
+            resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
+            
+            if resp.ok:
+                break  # Success
+            
+            # Check if it's a rate limit error
+            if resp.status_code == 429:
+                if attempt < max_retries - 1:
+                    # Extract retry time from error message
+                    import re, time
+                    retry_match = re.search(r'retry in ([\d.]+)s', resp.text)
+                    wait_time = float(retry_match.group(1)) if retry_match else 5
+                    print(f"  Rate limited. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
+                    time.sleep(wait_time)
+                else:
+                    # Last attempt failed
+                    return jsonify({
+                        'error': 'Gemini API rate limit exceeded. Please wait a moment and try again.',
+                        'answer': ''
+                    }), 429
+            else:
+                # Other error
+                error_detail = resp.text[:500]
+                return jsonify({'error': f'Gemini API error: HTTP {resp.status_code} - {error_detail}', 'answer': ''}), 500
+        
+        if not resp.ok:
+            return jsonify({'error': 'Failed after retries', 'answer': ''}), 500
+        
+        result = resp.json()
+        
+        # Extract answer from Gemini response
+        answer = ''
         try:
-            for attempt in range(3):
-                r = req.post(api_url, json=payload, timeout=60, proxies=proxies, stream=True)
-                if r.status_code == 429:
-                    m = re.search(r'retry in ([\d.]+)s', r.text)
-                    wait = float(m.group(1)) if m else 5
-                    print(f"  Rate limited, waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-                break
-
-            if not r.ok:
-                err = _json.dumps({'error': f'Gemini HTTP {r.status_code}'})
-                yield f"data: {err}\n\n".encode()
-                return
-
-            for line in r.iter_lines():
-                if not line:
-                    continue
-                if isinstance(line, bytes):
-                    line = line.decode('utf-8')
-                if not line.startswith('data:'):
-                    continue
-                raw = line[5:].strip()
-                if not raw or raw == '[DONE]':
-                    continue
-                try:
-                    obj = _json.loads(raw)
-                    chunk_text = (obj.get('candidates', [{}])[0]
-                                     .get('content', {})
-                                     .get('parts', [{}])[0]
-                                     .get('text', ''))
-                    if chunk_text:
-                        yield f"data: {_json.dumps({'chunk': chunk_text})}\n\n".encode()
-                except Exception:
-                    continue
-
-            yield f"data: {_json.dumps({'done': True})}\n\n".encode()
-
+            candidates = result.get('candidates', [])
+            if candidates:
+                content = candidates[0].get('content', {})
+                parts = content.get('parts', [])
+                if parts:
+                    answer = parts[0].get('text', '')
         except Exception as e:
-            import traceback; traceback.print_exc()
-            yield f"data: {_json.dumps({'error': str(e)})}\n\n".encode()
-
-    response = Response(generate(), mimetype='text/event-stream', direct_passthrough=True)
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Connection'] = 'keep-alive'
-    return response
+            print(f"  Error parsing Gemini response: {e}")
+            answer = ''
+        
+        if not answer:
+            return jsonify({'error': 'No response from Gemini', 'answer': ''}), 500
+        
+        print(f"  Response length: {len(answer)} chars")
+        
+        return jsonify({'answer': answer})
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'answer': ''}), 500
 
 
 @app.route('/api/debug/bse', methods=['POST'])
