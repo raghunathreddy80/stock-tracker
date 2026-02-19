@@ -2577,9 +2577,7 @@ def deepdive_fetch_docs():
 
     def generate():
         import queue, threading, time
-        yield ": keep-alive
-
-"
+        yield ": keep-alive\n\n"
 
         result_q = queue.Queue()
         max_workers = min(5, max(1, len(docs)))
@@ -2613,18 +2611,12 @@ def deepdive_fetch_docs():
                 result = result_q.get(timeout=10)
                 if result is None:
                     break
-                yield f"data: {_json.dumps(result)}
-
-"
+                yield f"data: {_json.dumps(result)}\n\n"
             except queue.Empty:
                 # Send heartbeat comment to keep connection alive on Render
-                yield ": heartbeat
+                yield ": heartbeat\n\n"
 
-"
-
-        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}
-
-"
+        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}\n\n"
 
     from flask import Response
     response = Response(generate(), mimetype='text/event-stream',
