@@ -1383,74 +1383,74 @@
                     return;
                 }
                 
-                document.getElementById('ddChatStatus').textContent = `Reading ${docsToFetch.length} documents...`;
-                
-                // Fetch documents in batches of 5 to avoid 502 gateway timeouts
-                const BATCH_SIZE = 5;
-                const allDocResults = [];
-                for (let i = 0; i < docsToFetch.length; i += BATCH_SIZE) {
-                    const batch = docsToFetch.slice(i, i + BATCH_SIZE);
-                    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-                    const totalBatches = Math.ceil(docsToFetch.length / BATCH_SIZE);
-                    document.getElementById('ddChatStatus').textContent =
-                        `Reading documents... (batch ${batchNum}/${totalBatches})`;
-                    
-                    const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            docs: batch,
-                            proxy_host: proxyHost,
-                            proxy_port: proxyPort
-                        })
-                    });
-                    
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    const batchData = await resp.json();
-                    allDocResults.push(...(batchData.docs || []));
-                }
-                
-                const data = { docs: allDocResults };
-                console.log('Fetched documents:', data);
-                
-                // Build context from document text
-                ddContext = `Company: ${ddCompany}\n\n`;
-                
+                // Stream documents via SSE to avoid 502 gateway timeouts
                 let successCount = 0;
                 let failCount = 0;
-                let failedDocs = [];
-                
-                data.docs.forEach(doc => {
-                    if (doc.text && doc.text.length > 100) {
-                        ddContext += `\n=== ${doc.title} ===\n${doc.text}\n`;
-                        successCount++;
-                        console.log(`✓ Extracted: ${doc.title} (${doc.text.length} chars)`);
-                    } else {
-                        failCount++;
-                        failedDocs.push(`${doc.title} - ${doc.error || 'Unknown error'}`);
-                        console.error(`✗ Failed: ${doc.title}`, doc.error || 'No text extracted');
-                    }
+                let receivedCount = 0;
+                ddContext = `Company: ${ddCompany}\n\n`;
+
+                document.getElementById('ddChatStatus').textContent =
+                    `Reading 0 / ${docsToFetch.length} documents...`;
+
+                const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        docs: docsToFetch,
+                        proxy_host: proxyHost,
+                        proxy_port: proxyPort
+                    })
                 });
-                
-                console.log(`\n📊 Summary: ${successCount}/${data.docs.length} documents extracted successfully`);
-                if (failedDocs.length > 0) {
-                    console.error('Failed documents:', failedDocs);
+
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+                // Read the SSE stream line-by-line — each doc arrives as it finishes
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete trailing line
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let parsed;
+                        try { parsed = JSON.parse(line.slice(6)); } catch { continue; }
+                        if (parsed.done) continue;
+
+                        receivedCount++;
+                        document.getElementById('ddChatStatus').textContent =
+                            `Reading ${receivedCount} / ${docsToFetch.length} documents...`;
+
+                        if (parsed.text && parsed.text.length > 100) {
+                            ddContext += `\n=== ${parsed.title} ===\n${parsed.text}\n`;
+                            successCount++;
+                            console.log(`✓ ${parsed.title} (${parsed.text.length} chars)`);
+                        } else {
+                            failCount++;
+                            console.error(`✗ ${parsed.title}`, parsed.error || 'No text');
+                        }
+                    }
                 }
-                
-                document.getElementById('ddChatStatus').textContent = 
-                    `${successCount} of ${data.docs.length} documents ready - ask anything!`;
-                
-                // Enable AI input
+
+                console.log(`📊 ${successCount}/${docsToFetch.length} documents extracted`);
+
+                document.getElementById('ddChatStatus').textContent =
+                    `${successCount} of ${docsToFetch.length} documents ready - ask anything!`;
+
                 document.getElementById('ddQuestion').disabled = false;
                 document.getElementById('ddSendBtn').disabled = false;
-                document.getElementById('ddQuestion').placeholder = 'Ask anything about this company\'s financials, strategy, risks...';
-                
-                let statusMsg = `I've read **${successCount} of ${data.docs.length} documents** for **${ddCompany}**.`;
-                if (failCount > 0) {
-                    statusMsg += ` (${failCount} documents couldn't be processed)`;
-                }
+                document.getElementById('ddQuestion').placeholder = "Ask anything about this company's financials, strategy, risks...";
+
+                let statusMsg = `I've read **${successCount} of ${docsToFetch.length} documents** for **${ddCompany}**.`;
+                if (failCount > 0) statusMsg += ` (${failCount} documents couldn't be processed)`;
                 statusMsg += ` Ask me anything about the company!`;
-                
+
                 ddAddSystemMessage(statusMsg);
                 
             } catch (error) {

@@ -2540,49 +2540,53 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
 @app.route('/api/deepdive/fetch-docs', methods=['POST'])
 def deepdive_fetch_docs():
     """
-    Fetch and extract text from documents.
+    Fetch and extract text from documents using Server-Sent Events (SSE).
+    Streams each document result as it completes, avoiding gateway timeouts.
     Expects: {docs: [{url, title, type}], proxy_host, proxy_port}
-    Returns: {docs: [{url, title, type, text, error}]}
+    Streams:  one JSON data line per doc, then {"done": true} sentinel.
     """
-    try:
-        data = request.get_json() or {}
-        docs = data.get('docs', [])
-        proxy_host = data.get('proxy_host', '').strip()
-        proxy_port = data.get('proxy_port', '').strip()
-        
-        proxies = make_proxies(proxy_host, proxy_port)
-        
-        print(f"\n[Fetch Docs] Processing {len(docs)} documents concurrently")
-        
-        def fetch_one(doc):
-            url = doc.get('url', '')
-            title = doc.get('title', '')
-            doc_type = doc.get('type', '')
-            print(f"\n  [{doc_type}] {title}")
-            text, error = extract_text_from_pdf(url, proxies)
-            return {
-                'url': url,
-                'title': title,
-                'type': doc_type,
-                'text': text,
-                'error': error,
-                'length': len(text)
-            }
-        
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        # Use up to 5 parallel workers to avoid overwhelming external servers
-        max_workers = min(5, len(docs))
-        results_map = {}
-        
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    data = request.get_json() or {}
+    docs = data.get('docs', [])
+    proxy_host = data.get('proxy_host', '').strip()
+    proxy_port = data.get('proxy_port', '').strip()
+    proxies = make_proxies(proxy_host, proxy_port)
+
+    print(f"\n[Fetch Docs SSE] Streaming {len(docs)} documents")
+
+    def fetch_one(item):
+        idx, doc = item
+        url = doc.get('url', '')
+        title = doc.get('title', '')
+        doc_type = doc.get('type', '')
+        print(f"  [{doc_type}] {title}")
+        text, error = extract_text_from_pdf(url, proxies)
+        return idx, {
+            'index': idx,
+            'url': url,
+            'title': title,
+            'type': doc_type,
+            'text': text,
+            'error': error,
+            'length': len(text)
+        }
+
+    def generate():
+        # Immediately send a keep-alive comment so the browser knows the connection is open
+        yield ": keep-alive\n\n"
+        max_workers = min(5, max(1, len(docs)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_index = {executor.submit(fetch_one, doc): i for i, doc in enumerate(docs)}
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
+            futures = {executor.submit(fetch_one, (i, doc)): i for i, doc in enumerate(docs)}
+            for future in as_completed(futures):
                 try:
-                    results_map[idx] = future.result()
+                    _, result = future.result()
                 except Exception as e:
-                    doc = docs[idx]
-                    results_map[idx] = {
+                    i = futures[future]
+                    doc = docs[i]
+                    result = {
+                        'index': i,
                         'url': doc.get('url', ''),
                         'title': doc.get('title', ''),
                         'type': doc.get('type', ''),
@@ -2590,16 +2594,13 @@ def deepdive_fetch_docs():
                         'error': str(e),
                         'length': 0
                     }
-        
-        # Return results in original order
-        results = [results_map[i] for i in range(len(docs))]
-        
-        return jsonify({'docs': results})
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e), 'docs': []}), 500
+                yield f"data: {_json.dumps(result)}\n\n"
+        yield f"data: {_json.dumps({'done': True, 'total': len(docs)})}\n\n"
+
+    response = app.response_class(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'   # disable nginx buffering
+    return response
 
 
 @app.route('/api/deepdive/ask', methods=['POST'])
