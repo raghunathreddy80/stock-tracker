@@ -1033,64 +1033,6 @@
         // AUTHENTICATION CHECK
         // ══════════════════════════════════════════════════════════════════════
         
-        async function checkAuth() {
-            try {
-                const response = await fetch(API_URL + '/auth/check', {
-                    credentials: 'include'
-                });
-                const data = await response.json();
-                
-                if (!data.authenticated) {
-                    window.location.href = '/login.html';
-                    return false;
-                }
-                
-                displayUsername(data.username);
-                return true;
-            } catch (error) {
-                console.error('Auth check failed:', error);
-                window.location.href = '/login.html';
-                return false;
-            }
-        }
-
-        function displayUsername(username) {
-            const header = document.querySelector('.header') || document.querySelector('header') || document.body.firstElementChild;
-            if (header && !document.getElementById('userInfo')) {
-                const userInfo = document.createElement('div');
-                userInfo.id = 'userInfo';
-                userInfo.style.cssText = 'position:absolute;top:1rem;right:1rem;display:flex;align-items:center;gap:1rem;z-index:1000;';
-                userInfo.innerHTML = `
-                    <span style="color:var(--text-secondary);font-weight:500;">👤 ${username}</span>
-                    <button onclick="logout()" style="padding:0.5rem 1rem;background:#ff4444;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:500;">
-                        Logout
-                    </button>
-                `;
-                header.style.position = 'relative';
-                header.appendChild(userInfo);
-            }
-        }
-
-        async function logout() {
-            try {
-                await fetch(API_URL + '/auth/logout', {
-                    method: 'POST',
-                    credentials: 'include'
-                });
-            } catch (error) {
-                console.error('Logout error:', error);
-            }
-            window.location.href = '/login.html';
-        }
-
-        // Run auth check on page load
-        (async function() {
-            const isAuthenticated = await checkAuth();
-            if (!isAuthenticated) return;
-            
-            // Your existing initialization code continues here
-        })();
-
         const WATCHLIST_KEY = 'stockTracker_watchlist';
         const PORTFOLIO_KEY = 'stockTracker_portfolio';
         const PROXY_KEY = 'stockTracker_proxy';
