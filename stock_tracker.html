@@ -1061,11 +1061,11 @@
             return url;
         }
 
-        function init() {
+        async function init() {
             // Check if backend is running
             checkBackend();
             
-            loadFromStorage();
+            await loadFromStorage(); // Wait for data to load from database
             renderWatchlist();
             renderPortfolio();
             updatePrices();
@@ -1087,17 +1087,39 @@
             }
         }
 
-        function loadFromStorage() {
-            const savedWatchlist = localStorage.getItem(WATCHLIST_KEY);
-            const savedPortfolio = localStorage.getItem(PORTFOLIO_KEY);
+        async function loadFromStorage() {
+            // Load watchlist from database
+            try {
+                const watchlistResponse = await fetch(API_URL + '/watchlist', {
+                    credentials: 'include'
+                });
+                if (watchlistResponse.ok) {
+                    watchlist = await watchlistResponse.json();
+                    console.log('Loaded watchlist from database:', watchlist);
+                }
+            } catch (error) {
+                console.error('Error loading watchlist:', error);
+                watchlist = [];
+            }
             
-            if (savedWatchlist) watchlist = JSON.parse(savedWatchlist);
-            if (savedPortfolio) portfolio = JSON.parse(savedPortfolio);
+            // Load portfolio from database
+            try {
+                const portfolioResponse = await fetch(API_URL + '/portfolio', {
+                    credentials: 'include'
+                });
+                if (portfolioResponse.ok) {
+                    portfolio = await portfolioResponse.json();
+                    console.log('Loaded portfolio from database:', portfolio);
+                }
+            } catch (error) {
+                console.error('Error loading portfolio:', error);
+                portfolio = [];
+            }
         }
 
         function saveToStorage() {
-            localStorage.setItem(WATCHLIST_KEY, JSON.stringify(watchlist));
-            localStorage.setItem(PORTFOLIO_KEY, JSON.stringify(portfolio));
+            // No longer needed - data is saved to database via API calls
+            console.log('Data auto-saved to database');
         }
 
         function switchTab(index) {
@@ -1840,26 +1862,39 @@
             }
             
             document.getElementById('updateIndicator').style.display = 'flex';
-            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Fetching price...</span>';
+            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Adding to watchlist...</span>';
             
-            const priceData = await fetchStockPrice(selectedStock.symbol);
-            
-            watchlist.push({
-                name: selectedStock.name,
-                symbol: selectedStock.symbol,
-                price: priceData ? priceData.price : 0,
-                change: priceData ? priceData.change : 0,
-                changePercent: priceData ? priceData.changePercent : 0,
-                volume: priceData ? priceData.volume : 0
-            });
-            
-            input.value = '';
-            saveToStorage();
-            renderWatchlist();
-            
-            // Refresh Deep Dive dropdown if initialized
-            if (ddInitialized) {
-                populateDDStockSelect();
+            // Add to database
+            try {
+                const response = await fetch(API_URL + '/watchlist/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        symbol: selectedStock.symbol,
+                        name: selectedStock.name
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Reload watchlist from database
+                    await loadFromStorage();
+                    renderWatchlist();
+                    
+                    // Refresh Deep Dive dropdown if initialized
+                    if (typeof ddInitialized !== 'undefined' && ddInitialized) {
+                        populateDDStockSelect();
+                    }
+                    
+                    input.value = '';
+                } else {
+                    alert(result.message || 'Failed to add to watchlist');
+                }
+            } catch (error) {
+                console.error('Error adding to watchlist:', error);
+                alert('Error adding to watchlist');
             }
             
             document.getElementById('updateIndicator').style.display = 'none';
@@ -1959,14 +1994,29 @@
             });
         }
 
-        function removeFromWatchlist(symbol) {
-            watchlist = watchlist.filter(s => s.symbol !== symbol);
-            saveToStorage();
-            renderWatchlist();
-            
-            // Refresh Deep Dive dropdown if initialized
-            if (ddInitialized) {
-                populateDDStockSelect();
+        async function removeFromWatchlist(symbol) {
+            try {
+                const response = await fetch(API_URL + '/watchlist/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ symbol })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Reload watchlist from database
+                    await loadFromStorage();
+                    renderWatchlist();
+                    
+                    // Refresh Deep Dive dropdown if initialized
+                    if (typeof ddInitialized !== 'undefined' && ddInitialized) {
+                        populateDDStockSelect();
+                    }
+                }
+            } catch (error) {
+                console.error('Error removing from watchlist:', error);
             }
         }
 
@@ -2013,10 +2063,6 @@
             const query = input.value.trim();
             const quantity = parseInt(quantityInput.value);
             
-            console.log('=== ADD TO PORTFOLIO DEBUG ===');
-            console.log('Query:', query);
-            console.log('Quantity:', quantity);
-            
             if (!query) {
                 alert('Please enter a company name');
                 return;
@@ -2030,10 +2076,7 @@
             document.getElementById('updateIndicator').style.display = 'flex';
             document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Searching for stocks...</span>';
             
-            console.log('Calling searchIndiaStocks...');
             const results = await searchIndiaStocks(query);
-            console.log('Search returned:', results.length, 'results');
-            
             document.getElementById('updateIndicator').style.display = 'none';
             
             if (results.length === 0) {
@@ -2050,51 +2093,72 @@
                 selectedStock = results[0];
             }
             
-            console.log('Selected stock:', selectedStock);
+            document.getElementById('updateIndicator').style.display = 'flex';
+            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Fetching price...</span>';
             
-            if (portfolio.find(s => s.symbol === selectedStock.symbol)) {
-                alert('Stock already in portfolio');
+            const priceData = await fetchStockPrice(selectedStock.symbol);
+            const buyPrice = priceData ? priceData.price : 0;
+            
+            if (!buyPrice) {
+                document.getElementById('updateIndicator').style.display = 'none';
+                alert('Unable to fetch current price. Please try again.');
                 return;
             }
             
-            document.getElementById('updateIndicator').style.display = 'flex';
-            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Fetching price...</span>';
-            console.log('Fetching price for:', selectedStock.symbol);
-            
-            const priceData = await fetchStockPrice(selectedStock.symbol);
-            console.log('Price data received:', priceData);
-            
-            if (!priceData || !priceData.price || priceData.price === 0) {
-                document.getElementById('updateIndicator').style.display = 'none';
-                alert(`Unable to fetch price for ${selectedStock.name}.\n\nPossible reasons:\n1. Stock symbol may be incorrect\n2. Market is closed\n3. Backend server issue\n\nThe stock will be added with ₹0 price. You can refresh prices later.`);
+            // Add to database
+            try {
+                const response = await fetch(API_URL + '/portfolio/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        symbol: selectedStock.symbol,
+                        name: selectedStock.name,
+                        quantity: quantity,
+                        buy_price: buyPrice,
+                        buy_date: new Date().toISOString().split('T')[0]
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Reload from database
+                    await loadFromStorage();
+                    renderPortfolio();
+                    updatePortfolioChart();
+                    input.value = '';
+                    quantityInput.value = '1';
+                } else {
+                    alert(result.message || 'Failed to add to portfolio');
+                }
+            } catch (error) {
+                console.error('Error adding to portfolio:', error);
+                alert('Error adding to portfolio');
             }
             
-            const newStock = {
-                name: selectedStock.name,
-                symbol: selectedStock.symbol,
-                price: priceData ? priceData.price : 0,
-                quantity: quantity,
-                totalValue: priceData ? priceData.price * quantity : 0
-            };
-            
-            console.log('Adding to portfolio:', newStock);
-            portfolio.push(newStock);
-            
-            input.value = '';
-            quantityInput.value = '1';
-            saveToStorage();
-            renderPortfolio();
-            updatePortfolioChart();
             document.getElementById('updateIndicator').style.display = 'none';
-            console.log('=== PORTFOLIO ADD COMPLETE ===');
-            console.log('Current portfolio:', portfolio);
         }
 
-        function removeFromPortfolio(symbol) {
-            portfolio = portfolio.filter(s => s.symbol !== symbol);
-            saveToStorage();
-            renderPortfolio();
-            updatePortfolioChart();
+        async function removeFromPortfolio(holdingId) {
+            try {
+                const response = await fetch(API_URL + '/portfolio/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ holding_id: holdingId })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    await loadFromStorage();
+                    renderPortfolio();
+                    updatePortfolioChart();
+                }
+            } catch (error) {
+                console.error('Error removing from portfolio:', error);
+            }
         }
 
         function updateQuantity(symbol, newQuantity) {
@@ -2127,21 +2191,28 @@
             const totalPortfolioValue = portfolio.reduce((sum, stock) => sum + stock.totalValue, 0);
             
             tbody.innerHTML = portfolio.map(stock => {
-                const percentage = totalPortfolioValue > 0 ? (stock.totalValue / totalPortfolioValue * 100) : 0;
+                const currentValue = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
+                const investedValue = (stock.buy_price || stock.price || 0) * (stock.quantity || 0);
+                const profitLoss = currentValue - investedValue;
+                const profitLossPercent = investedValue > 0 ? (profitLoss / investedValue * 100) : 0;
+                const profitLossClass = profitLoss >= 0 ? 'positive' : 'negative';
+                
+                const percentage = totalPortfolioValue > 0 ? (currentValue / totalPortfolioValue * 100) : 0;
                 return `
                     <tr>
                         <td>
                             <div class="company-name">${stock.name}</div>
+                            <div style="font-size:0.8rem;color:var(--text-secondary);">${stock.symbol}</div>
                         </td>
-                        <td class="price">₹${stock.price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                        <td>
-                            <input type="number" class="editable-quantity" value="${stock.quantity}" min="1" 
-                                onchange="updateQuantity('${stock.symbol}', this.value)">
+                        <td class="price">₹${(stock.current_price || stock.price || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                        <td>${stock.quantity || 0}</td>
+                        <td class="price">₹${currentValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                        <td class="${profitLossClass}">
+                            ₹${profitLoss.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                            (${profitLossPercent >= 0 ? '+' : ''}${profitLossPercent.toFixed(2)}%)
                         </td>
-                        <td class="price">₹${stock.totalValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                        <td>${percentage.toFixed(2)}%</td>
                         <td>
-                            <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromPortfolio('${stock.symbol}')">Remove</button>
+                            <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromPortfolio(${stock.id})">Remove</button>
                         </td>
                     </tr>
                 `;
@@ -2151,11 +2222,21 @@
         }
 
         function updatePortfolioStats() {
-            const totalValue = portfolio.reduce((sum, stock) => sum + stock.totalValue, 0);
+            const totalInvested = portfolio.reduce((sum, stock) => sum + ((stock.buy_price || 0) * (stock.quantity || 0)), 0);
+            const totalCurrent = portfolio.reduce((sum, stock) => sum + ((stock.current_price || stock.price || 0) * (stock.quantity || 0)), 0);
+            const totalProfitLoss = totalCurrent - totalInvested;
+            const totalProfitLossPercent = totalInvested > 0 ? (totalProfitLoss / totalInvested * 100) : 0;
             const totalStocks = portfolio.length;
             
-            document.getElementById('totalValue').textContent = `₹${totalValue.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
+            document.getElementById('totalValue').textContent = `₹${totalCurrent.toLocaleString('en-IN', {minimumFractionDigits: 2})}`;
             document.getElementById('totalStocks').textContent = totalStocks;
+            
+            // Update profit/loss if elements exist
+            const plElement = document.getElementById('totalProfitLoss');
+            if (plElement) {
+                plElement.textContent = `₹${totalProfitLoss.toLocaleString('en-IN', {minimumFractionDigits: 2})} (${totalProfitLossPercent >= 0 ? '+' : ''}${totalProfitLossPercent.toFixed(2)}%)`;
+                plElement.className = totalProfitLoss >= 0 ? 'positive' : 'negative';
+            }
         }
 
         function updatePortfolioChart() {
@@ -2170,7 +2251,7 @@
                 return;
             }
             
-            const data = portfolio.map(stock => stock.totalValue);
+            const data = portfolio.map(stock => (stock.current_price || stock.price || 0) * (stock.quantity || 0));
             // Remove .NS and .BO from labels
             const labels = portfolio.map(stock => stock.symbol.replace('.NS', '').replace('.BO', ''));
             const colors = [
