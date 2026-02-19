@@ -28,9 +28,6 @@ import yfinance as yf
 import requests as req
 
 app = Flask(__name__)
-@app.route('/stock_tracker.html')
-def stock_tracker_page():
-    return send_file('stock_tracker.html')
 CORS(app)
 
 # Initialize Flask-Login
