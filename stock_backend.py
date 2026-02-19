@@ -597,26 +597,25 @@ def get_quote():
         os.environ.pop('HTTPS_PROXY', None)
 
     try:
+        pdata = get_price_robust(symbol)
+        if not pdata:
+            return jsonify({'error': 'No data available'}), 404
+
         ticker = yf.Ticker(symbol)
-        info   = ticker.info
-        hist   = ticker.history(period='1d')
-
-        if hist.empty:
-            return jsonify({'error': 'No data'}), 404
-
-        price  = float(hist['Close'].iloc[-1])
-        prev   = float(info.get('previousClose') or price)
-        chg    = price - prev
-        chg_pc = (chg / prev * 100) if prev else 0
+        info = {}
+        try:
+            info = ticker.info
+        except Exception:
+            pass
 
         return jsonify({
             'symbol':        symbol,
             'name':          info.get('longName') or info.get('shortName') or symbol,
-            'price':         round(price,  2),
-            'change':        round(chg,    2),
-            'changePercent': round(chg_pc, 4),
-            'volume':        int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0,
-            'previousClose': round(prev,   2),
+            'price':         pdata['price'],
+            'change':        pdata['change'],
+            'changePercent': pdata['changePercent'],
+            'volume':        pdata['volume'],
+            'previousClose': pdata['previousClose'],
         })
 
     except Exception as e:

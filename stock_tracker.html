@@ -1636,6 +1636,25 @@
         // Backend API URL
         // Auto-detect API URL (works both locally and on Render)
         const API_URL = window.location.origin + '/api';
+
+        // ── Proxy helpers (no proxy needed on Render — always returns empty) ──
+        function parseProxy() {
+            const host = localStorage.getItem('proxyHost') || '';
+            const port = localStorage.getItem('proxyPort') || '';
+            return { host, port };
+        }
+        function saveProxySettings() {
+            const host = document.getElementById('proxyHostInput');
+            const port = document.getElementById('proxyPortInput');
+            if (host) localStorage.setItem('proxyHost', host.value.trim());
+            if (port) localStorage.setItem('proxyPort', port.value.trim());
+        }
+        function loadProxySettings() {
+            const host = document.getElementById('proxyHostInput');
+            const port = document.getElementById('proxyPortInput');
+            if (host) host.value = localStorage.getItem('proxyHost') || '';
+            if (port) port.value = localStorage.getItem('proxyPort') || '';
+        }
 		
 		// Authentication check - redirect to login if not authenticated
     (async function() {
@@ -1718,30 +1737,29 @@
         async function fetchStockPrice(symbol) {
             try {
                 console.log('Fetching price for:', symbol);
+                // Try /api/quote first
                 const url = `${API_URL}/quote?symbol=${encodeURIComponent(symbol)}`;
-                const response = await fetch(url);
+                const response = await fetch(url, { credentials: 'include' });
                 
-                if (!response.ok) {
-                    console.error('Quote fetch failed with status:', response.status);
-                    const errorData = await response.json();
-                    console.error('Error details:', errorData);
-                    return null;
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.price && data.price > 0) {
+                        console.log('Price data:', data);
+                        return { price: data.price, change: data.change,
+                                 changePercent: data.changePercent, volume: data.volume };
+                    }
                 }
-                
-                const data = await response.json();
-                
-                if (data.error) {
-                    console.error('Quote error:', data.error);
-                    return null;
+
+                // Fallback: try watchlist endpoint price for same symbol
+                const wlResp = await fetch(`${API_URL}/watchlist`, { credentials: 'include' });
+                if (wlResp.ok) {
+                    const wl = await wlResp.json();
+                    const match = wl.find(s => s.symbol === symbol);
+                    if (match && match.price > 0) return { price: match.price, change: match.change,
+                                                            changePercent: match.changePercent, volume: match.volume };
                 }
-                
-                console.log('Price data:', data);
-                return {
-                    price: data.price,
-                    change: data.change,
-                    changePercent: data.changePercent,
-                    volume: data.volume
-                };
+
+                return null;
             } catch (error) {
                 console.error('Price fetch error:', error);
                 return null;
@@ -2021,10 +2039,9 @@
             const priceData = await fetchStockPrice(selectedStock.symbol);
             const buyPrice = priceData ? priceData.price : 0;
             
+            // Don't block the add if price fetch fails — price will update on next refresh
             if (!buyPrice) {
-                document.getElementById('updateIndicator').style.display = 'none';
-                alert('Unable to fetch current price. Please try again.');
-                return;
+                console.warn('Price fetch failed for', selectedStock.symbol, '— adding with price 0, will update on refresh');
             }
             
             // Add to database
