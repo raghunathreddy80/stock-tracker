@@ -934,6 +934,7 @@
                 <table>
                     <thead>
                         <tr>
+                            <th style="width:60px;text-align:center;">Order</th>
                             <th>Company</th>
                             <th>Price (₹)</th>
                             <th>Change (₹)</th>
@@ -944,7 +945,7 @@
                     </thead>
                     <tbody id="watchlistTable">
                         <tr>
-                            <td colspan="6" class="empty-state">
+                            <td colspan="7" class="empty-state">
                                 <div class="empty-state-icon">📈</div>
                                 <p>No stocks in watchlist. Add stocks to start tracking.</p>
                             </td>
@@ -1332,11 +1333,29 @@
             document.querySelectorAll(`.${type}-checkbox`).forEach(cb => cb.checked = checked);
         }
 
+        // ── Deep Dive control locking ─────────────────────────────────────────
+        function setDDControlsLocked(locked) {
+            // Lock/unlock the company dropdown
+            const sel = document.getElementById('ddStockSelect');
+            if (sel) sel.disabled = locked;
+
+            // Lock/unlock every document checkbox (individual + select-all headers)
+            document.querySelectorAll(
+                '.annual-checkbox, .concall-checkbox, .presentation-checkbox, #selectAllAnnual, #selectAllConcall, #selectAllPresentation'
+            ).forEach(cb => { cb.disabled = locked; });
+
+            // Lock/unlock the Read button itself so it can't be double-clicked
+            const readBtn = document.getElementById('ddReadBtn');
+            if (readBtn) readBtn.disabled = locked;
+        }
+
         async function fetchDocumentText() {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxy();
-                
-                // Get only SELECTED documents based on checkboxes
+
+                // ── Lock controls while reading ──
+                setDDControlsLocked(true);
+                document.getElementById('ddChatStatus').textContent = 'Reading documents...';
                 const docsToFetch = [];
                 
                 // Get selected annual reports
@@ -1440,11 +1459,16 @@
                 statusMsg += ` Ask me anything about the company!`;
                 
                 ddAddSystemMessage(statusMsg);
+
+                // ── Unlock controls after reading ──
+                setDDControlsLocked(false);
                 
             } catch (error) {
                 console.error('Fetch docs error:', error);
                 document.getElementById('ddChatStatus').textContent = `Error fetching documents: ${error.message}`;
                 ddAddSystemMessage(`Could not fetch document text. I can still answer questions using my general knowledge.`);
+                // ── Unlock on error too ──
+                setDDControlsLocked(false);
             }
         }
 
@@ -1459,7 +1483,7 @@
                 <div style="margin-bottom:2rem;">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
                         <h3 style="margin:0;color:var(--text-primary);font-size:1.1rem;">
-                            <input type="checkbox" id="selectAllAnnual" onchange="toggleAllDocs('annual', this.checked)" style="margin-right:0.5rem;" checked>
+                            <input type="checkbox" id="selectAllAnnual" onchange="toggleAllDocs('annual', this.checked)" style="margin-right:0.5rem;">
                             📄 Annual Reports
                         </h3>
                     </div>
@@ -1474,7 +1498,7 @@
                         .trim();
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
-                            <input type="checkbox" class="doc-checkbox annual-checkbox" data-type="annual" data-index="${idx}" checked style="margin-right:0.5rem;">
+                            <input type="checkbox" class="doc-checkbox annual-checkbox" data-type="annual" data-index="${idx}" style="margin-right:0.5rem;">
                             <span class="dd-source-icon">📄</span>
                             <div style="flex:1;min-width:0;">
                                 <div class="dd-source-name">${cleanTitle}</div>
@@ -1505,7 +1529,7 @@
                 <div style="margin-bottom:2rem;">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
                         <h3 style="margin:0;color:var(--text-primary);font-size:1.1rem;">
-                            <input type="checkbox" id="selectAllConcall" onchange="toggleAllDocs('concall', this.checked)" style="margin-right:0.5rem;" checked>
+                            <input type="checkbox" id="selectAllConcall" onchange="toggleAllDocs('concall', this.checked)" style="margin-right:0.5rem;">
                             🎙️ Earnings Call Transcripts
                         </h3>
                     </div>
@@ -1527,7 +1551,7 @@
                     if (!label) label = `Transcript ${idx + 1}`;
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
-                            <input type="checkbox" class="doc-checkbox concall-checkbox" data-type="concall" data-index="${idx}" checked style="margin-right:0.5rem;">
+                            <input type="checkbox" class="doc-checkbox concall-checkbox" data-type="concall" data-index="${idx}" style="margin-right:0.5rem;">
                             <span class="dd-source-icon">🎙️</span>
                             <div style="flex:1;min-width:0;">
                                 <div class="dd-source-name">${label}</div>
@@ -1568,7 +1592,7 @@
                     if (doc.date) presTitle += ` – ${doc.date}`;
                     html += `
                         <div class="dd-source-item loaded" style="margin-bottom:0.5rem;">
-                            <input type="checkbox" class="doc-checkbox presentation-checkbox" data-type="presentation" data-index="${idx}" checked style="margin-right:0.5rem;">
+                            <input type="checkbox" class="doc-checkbox presentation-checkbox" data-type="presentation" data-index="${idx}" style="margin-right:0.5rem;">
                             <span class="dd-source-icon">📊</span>
                             <div style="flex:1;min-width:0;">
                                 <div class="dd-source-name">${presTitle}</div>
@@ -1597,7 +1621,7 @@
             // Add "Read Selected Documents" button
             html += `
                 <div style="margin-top:2rem;text-align:center;">
-                    <button onclick="fetchDocumentText()" class="btn" style="width:100%;padding:1rem;font-size:1rem;font-weight:600;">
+                    <button id="ddReadBtn" onclick="fetchDocumentText()" class="btn" style="width:100%;padding:1rem;font-size:1rem;font-weight:600;">
                         📖 Read Selected Documents
                     </button>
                 </div>
@@ -1750,9 +1774,16 @@
     (async function() {
         try {
             const response = await fetch(API_URL + '/auth/check', { credentials: 'include' });
+            // If the server returns HTML or a non-JSON response (e.g. a redirect page),
+            // check Content-Type before parsing to avoid SyntaxError.
+            const ct = response.headers.get('content-type') || '';
+            if (!response.ok || !ct.includes('application/json')) {
+                window.location.href = '/login.html';
+                return;
+            }
             const data = await response.json();
-            
-            if (!data.authenticated) {
+            // 401 means not logged in — redirect to login
+            if (response.status === 401 || !data.authenticated) {
                 window.location.href = '/login.html';
                 return;
             }
@@ -2050,13 +2081,21 @@
             }
         }
 
+        // ── Watchlist row reorder ──────────────────────────────────────────────
+        function moveWatchlistItem(index, direction) {
+            const target = index + direction;
+            if (target < 0 || target >= watchlist.length) return;
+            [watchlist[index], watchlist[target]] = [watchlist[target], watchlist[index]];
+            renderWatchlist();
+        }
+
         function renderWatchlist() {
             const tbody = document.getElementById('watchlistTable');
             
             if (watchlist.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="6" class="empty-state">
+                        <td colspan="7" class="empty-state">
                             <div class="empty-state-icon">📈</div>
                             <p>No stocks in watchlist. Add stocks to start tracking.</p>
                         </td>
@@ -2064,9 +2103,38 @@
                 `;
                 return;
             }
-            
-            tbody.innerHTML = watchlist.map(stock => `
+
+            const reorderBtnStyle = `
+                display:block;width:26px;height:22px;line-height:1;font-size:0.7rem;
+                background:var(--bg-tertiary);border:1px solid var(--border-color);
+                border-radius:4px;color:var(--text-secondary);cursor:pointer;
+                transition:border-color 0.15s,color 0.15s;
+            `;
+            const disabledExtra = `opacity:0.25;cursor:not-allowed;`;
+
+            tbody.innerHTML = watchlist.map((stock, idx) => {
+                const isFirst = idx === 0;
+                const isLast  = idx === watchlist.length - 1;
+                return `
                 <tr>
+                    <td style="text-align:center;padding:0.8rem 0.5rem;">
+                        <div style="display:inline-flex;flex-direction:column;gap:2px;align-items:center;">
+                            <button
+                                onclick="moveWatchlistItem(${idx},-1)"
+                                title="Move up"
+                                style="${reorderBtnStyle}${isFirst ? disabledExtra : ''}"
+                                ${isFirst ? 'disabled' : ''}
+                                onmouseenter="if(!this.disabled)this.style.borderColor='var(--accent-primary)',this.style.color='var(--accent-primary)'"
+                                onmouseleave="this.style.borderColor='var(--border-color)',this.style.color='var(--text-secondary)'">▲</button>
+                            <button
+                                onclick="moveWatchlistItem(${idx},1)"
+                                title="Move down"
+                                style="${reorderBtnStyle}${isLast ? disabledExtra : ''}"
+                                ${isLast ? 'disabled' : ''}
+                                onmouseenter="if(!this.disabled)this.style.borderColor='var(--accent-primary)',this.style.color='var(--accent-primary)'"
+                                onmouseleave="this.style.borderColor='var(--border-color)',this.style.color='var(--text-secondary)'">▼</button>
+                        </div>
+                    </td>
                     <td>
                         <div class="company-name">${stock.name}</div>
                     </td>
@@ -2083,8 +2151,8 @@
                     <td>
                         <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromWatchlist('${stock.symbol}')">Remove</button>
                     </td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
         }
 
         async function addToPortfolio() {
@@ -2624,8 +2692,11 @@
         }
         window.addEventListener('load', init);
 
-        document.getElementById('proxyHostInput').addEventListener('change', saveProxySettings);
-        document.getElementById('proxyPortInput').addEventListener('change', saveProxySettings);
+        // Proxy inputs are optional — only wire up if they exist in the DOM
+        const _phi = document.getElementById('proxyHostInput');
+        const _ppi = document.getElementById('proxyPortInput');
+        if (_phi) _phi.addEventListener('change', saveProxySettings);
+        if (_ppi) _ppi.addEventListener('change', saveProxySettings);
     </script>
     <!-- Fullscreen answer modal -->
     <div id="ddFullscreenModal">

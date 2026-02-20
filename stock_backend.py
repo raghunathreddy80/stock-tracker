@@ -118,10 +118,34 @@ def resolve_bse_code(base_symbol, proxies=None):
 app = Flask(__name__)
 CORS(app)
 
+# Base directory — always resolve relative to this file, not cwd
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load HTML files into memory at startup so file path issues on hosting
+# platforms (Render, Railway, etc.) can never cause a 404.
+def _read_file(filename):
+    path = os.path.join(BASE_DIR, filename)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        print(f"WARNING: could not read {path}: {e}")
+        return f"<h1>File not found: {filename}</h1>"
+
+_LOGIN_HTML        = _read_file('login.html')
+_STOCK_TRACKER_HTML = _read_file('stock_tracker.html')
+
 # Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production')
+
+# Return JSON 401 instead of redirecting to a login page
+# This prevents Flask-Login from returning an HTML redirect that the
+# frontend misinterprets as a 404 or invalid JSON.
+@login_manager.unauthorized_handler
+def unauthorized():
+    return jsonify({'authenticated': False, 'error': 'Login required'}), 401
 
 # Initialize database
 init_db()
@@ -131,17 +155,19 @@ def load_user(user_id):
     return get_user_by_id(int(user_id))
 
 # Serve HTML pages
+from flask import Response
+
 @app.route('/')
 def home():
-    return send_file('login.html')
+    return Response(_LOGIN_HTML, mimetype='text/html')
 
 @app.route('/login.html')
 def login_page():
-    return send_file('login.html')
+    return Response(_LOGIN_HTML, mimetype='text/html')
 
 @app.route('/stock_tracker.html')
 def stock_tracker_page():
-    return send_file('stock_tracker.html')
+    return Response(_STOCK_TRACKER_HTML, mimetype='text/html')
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
