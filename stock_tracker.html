@@ -1917,6 +1917,16 @@
                 selectedStock = results[0];
             }
             
+            // Always fetch fresh watchlist from server before duplicate check
+            // (local array can be stale after a remove)
+            try {
+                const freshResp = await fetch(API_URL + '/watchlist', { credentials: 'include' });
+                if (freshResp.ok) {
+                    const freshData = await freshResp.json();
+                    if (Array.isArray(freshData)) watchlist = freshData;
+                }
+            } catch (e) { /* use existing watchlist if fetch fails */ }
+
             if (watchlist.find(s => s.symbol === selectedStock.symbol)) {
                 alert('Stock already in watchlist');
                 return;
