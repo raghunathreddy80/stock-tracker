@@ -249,11 +249,14 @@ def add_to_watchlist(user_id, symbol, name):
         c = conn.cursor()
 
         # Get the next order_index (append to end)
+        # Note: PostgreSQL RealDictCursor returns dicts, not tuples — access by column name
         if USE_POSTGRES:
-            c.execute('SELECT COALESCE(MAX(order_index), -1) + 1 FROM watchlists WHERE user_id = %s', (user_id,))
+            c.execute('SELECT COALESCE(MAX(order_index), -1) + 1 AS next_idx FROM watchlists WHERE user_id = %s', (user_id,))
+            row = c.fetchone()
+            next_index = row['next_idx'] if row else 0
         else:
             c.execute('SELECT COALESCE(MAX(order_index), -1) + 1 FROM watchlists WHERE user_id = ?', (user_id,))
-        next_index = c.fetchone()[0]
+            next_index = c.fetchone()[0]
 
         if USE_POSTGRES:
             # ON CONFLICT: if the symbol was previously removed but lingered, update it cleanly

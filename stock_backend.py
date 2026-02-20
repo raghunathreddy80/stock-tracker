@@ -395,7 +395,7 @@ def add_to_watchlist_api():
         
         if add_to_watchlist(current_user.id, symbol, name):
             return jsonify({'success': True, 'message': 'Added to watchlist'})
-        return jsonify({'success': False, 'message': 'Already in watchlist'}), 400
+        return jsonify({'success': False, 'message': 'Failed to add — check server logs'}), 400
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
@@ -571,6 +571,31 @@ def get_portfolio_summary_api():
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/fix-watchlist-dupes')
+def fix_watchlist_dupes():
+    """TEMPORARY: Delete stuck/duplicate watchlist rows so they can be re-added."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        c = conn.cursor()
+        # Find and delete any symbols that appear more than once per user,
+        # keeping only the most recently added one
+        c.execute("""
+            DELETE FROM watchlists
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM watchlists
+                GROUP BY user_id, symbol
+            )
+        """)
+        deleted = c.rowcount
+        conn.commit()
+        conn.close()
+        return f'<h3>Done! Removed {deleted} duplicate/stuck row(s). You can now re-add stocks.</h3>'
+    except Exception as e:
+        return f'<h3>Error: {e}</h3>', 500
 
 
 @app.route('/api/search')
