@@ -16,7 +16,7 @@ for pkg, imp in [('flask','flask'),('flask-cors','flask_cors'),
         print(f"Installing {pkg}…")
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
 
-from flask import Flask, jsonify, request, send_file, redirect
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from auth import (init_db, create_user, verify_user, get_user_by_id, 
@@ -121,16 +121,7 @@ CORS(app)
 # Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'login_page'
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production')
-
-@login_manager.unauthorized_handler
-def unauthorized():
-    """Return JSON 401 for API routes, redirect to login for browser requests."""
-    from flask import request as flask_request
-    if flask_request.path.startswith('/api/'):
-        return jsonify({'authenticated': False, 'error': 'Login required'}), 401
-    return redirect('/login.html')
 
 # Initialize database
 init_db()
@@ -2637,8 +2628,8 @@ Document context:
         print(f"  Gemini API key: {api_key[:20]}...{api_key[-10:]}")
         
         # Call Google Gemini API (using v1beta)
-        # Using gemini-2.0-flash for better accuracy on free tier
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        # Using gemini-2.5-flash-lite for better free tier limits
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
         
         # Build messages - Gemini uses different format
         # Combine system prompt and chat history
@@ -2672,11 +2663,9 @@ Document context:
         print(f"  Calling Gemini API (gemini-2.5-flash-lite)...")
         
         # Retry logic for rate limits
-        import re, time
-        max_retries = 5
-        base_wait = 15  # seconds — Gemini free tier needs ~15s between requests
+        max_retries = 3
         for attempt in range(max_retries):
-            resp = req.post(api_url, json=payload, timeout=55, proxies=proxies)
+            resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
             
             if resp.ok:
                 break  # Success
@@ -2684,21 +2673,17 @@ Document context:
             # Check if it's a rate limit error
             if resp.status_code == 429:
                 if attempt < max_retries - 1:
-                    # Prefer retry-after from error body, else exponential backoff
-                    retry_match = re.search(r'retry[_ ](?:after|in)["\s:]+([0-9.]+)', resp.text, re.I)
-                    if retry_match:
-                        wait_time = float(retry_match.group(1))
-                    else:
-                        wait_time = base_wait * (2 ** attempt)  # 15s, 30s, 60s, 120s
-                    wait_time = min(wait_time, 120)  # cap at 2 minutes
+                    # Extract retry time from error message
+                    import re, time
+                    retry_match = re.search(r'retry in ([\d.]+)s', resp.text)
+                    wait_time = float(retry_match.group(1)) if retry_match else 5
                     print(f"  Rate limited. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
                     time.sleep(wait_time)
                 else:
-                    # All retries exhausted
+                    # Last attempt failed
                     return jsonify({
-                        'error': 'Gemini API rate limit exceeded. The free tier allows ~15 requests/minute — please wait 30–60 seconds and try again.',
-                        'answer': '',
-                        'rate_limited': True
+                        'error': 'Gemini API rate limit exceeded. Please wait a moment and try again.',
+                        'answer': ''
                     }), 429
             else:
                 # Other error
