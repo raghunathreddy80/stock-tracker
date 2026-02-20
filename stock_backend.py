@@ -21,8 +21,8 @@ from flask_cors import CORS
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from auth import (init_db, create_user, verify_user, get_user_by_id, 
                   update_last_login, get_user_watchlist, add_to_watchlist, 
-                  remove_from_watchlist, get_user_portfolio, add_to_portfolio,
-                  update_portfolio_holding, remove_from_portfolio)
+                  remove_from_watchlist, reorder_watchlist, get_user_portfolio,
+                  add_to_portfolio, update_portfolio_holding, remove_from_portfolio)
 
 import yfinance as yf
 import requests as req
@@ -412,6 +412,21 @@ def remove_from_watchlist_api():
         
         remove_from_watchlist(current_user.id, symbol)
         return jsonify({'success': True, 'message': 'Removed from watchlist'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/watchlist/reorder', methods=['POST'])
+@login_required
+def reorder_watchlist_api():
+    """Save the user's watchlist order"""
+    try:
+        data = request.get_json()
+        symbols = data.get('symbols', [])
+        if not symbols:
+            return jsonify({'success': False, 'message': 'No symbols provided'}), 400
+        reorder_watchlist(current_user.id, symbols)
+        return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 

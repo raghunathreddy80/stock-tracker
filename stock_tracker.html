@@ -2087,6 +2087,14 @@
             if (target < 0 || target >= watchlist.length) return;
             [watchlist[index], watchlist[target]] = [watchlist[target], watchlist[index]];
             renderWatchlist();
+            // Persist the new order to the database
+            const symbols = watchlist.map(s => s.symbol);
+            fetch(API_URL + '/watchlist/reorder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ symbols })
+            }).catch(err => console.error('Reorder save failed:', err));
         }
 
         function renderWatchlist() {

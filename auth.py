@@ -59,11 +59,17 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 symbol VARCHAR(20) NOT NULL,
                 name VARCHAR(200) NOT NULL,
+                order_index INTEGER NOT NULL DEFAULT 0,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 UNIQUE(user_id, symbol)
             )
         ''')
+        # Add order_index column if it doesn't exist (for existing databases)
+        try:
+            c.execute('ALTER TABLE watchlists ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0')
+        except Exception:
+            pass  # Column already exists
         
         c.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -97,11 +103,17 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 symbol TEXT NOT NULL,
                 name TEXT NOT NULL,
+                order_index INTEGER NOT NULL DEFAULT 0,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 UNIQUE(user_id, symbol)
             )
         ''')
+        # Add order_index column if it doesn't exist (for existing databases)
+        try:
+            c.execute('ALTER TABLE watchlists ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0')
+        except Exception:
+            pass  # Column already exists
         
         c.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
@@ -208,24 +220,23 @@ def update_last_login(user_id):
 
 # Watchlist functions
 def get_user_watchlist(user_id):
-    """Get user's watchlist"""
+    """Get user's watchlist ordered by user-defined order"""
     conn = get_db_connection()
     c = conn.cursor()
     
     if USE_POSTGRES:
         c.execute(
-            'SELECT id, symbol, name, added_at FROM watchlists WHERE user_id = %s ORDER BY added_at DESC',
+            'SELECT id, symbol, name, order_index, added_at FROM watchlists WHERE user_id = %s ORDER BY order_index ASC, added_at ASC',
             (user_id,)
         )
     else:
         c.execute(
-            'SELECT id, symbol, name, added_at FROM watchlists WHERE user_id = ? ORDER BY added_at DESC',
+            'SELECT id, symbol, name, order_index, added_at FROM watchlists WHERE user_id = ? ORDER BY order_index ASC, added_at ASC',
             (user_id,)
         )
     
     watchlist = c.fetchall()
     conn.close()
-    
     return [dict(w) for w in watchlist]
 
 def add_to_watchlist(user_id, symbol, name):
@@ -233,23 +244,54 @@ def add_to_watchlist(user_id, symbol, name):
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        
+
+        # Get the next order_index (append to end)
+        if USE_POSTGRES:
+            c.execute('SELECT COALESCE(MAX(order_index), -1) + 1 FROM watchlists WHERE user_id = %s', (user_id,))
+        else:
+            c.execute('SELECT COALESCE(MAX(order_index), -1) + 1 FROM watchlists WHERE user_id = ?', (user_id,))
+        next_index = c.fetchone()[0]
+
         if USE_POSTGRES:
             c.execute(
-                'INSERT INTO watchlists (user_id, symbol, name) VALUES (%s, %s, %s)',
-                (user_id, symbol, name)
+                'INSERT INTO watchlists (user_id, symbol, name, order_index) VALUES (%s, %s, %s, %s)',
+                (user_id, symbol, name, next_index)
             )
         else:
             c.execute(
-                'INSERT INTO watchlists (user_id, symbol, name) VALUES (?, ?, ?)',
-                (user_id, symbol, name)
+                'INSERT INTO watchlists (user_id, symbol, name, order_index) VALUES (?, ?, ?, ?)',
+                (user_id, symbol, name, next_index)
             )
-        
+
         conn.commit()
         conn.close()
         return True
     except Exception as e:
         print(f"Error adding to watchlist: {e}")
+        return False
+
+
+def reorder_watchlist(user_id, symbols_in_order):
+    """Save the user's watchlist order. symbols_in_order is a list of symbols top-to-bottom."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        for idx, symbol in enumerate(symbols_in_order):
+            if USE_POSTGRES:
+                c.execute(
+                    'UPDATE watchlists SET order_index = %s WHERE user_id = %s AND symbol = %s',
+                    (idx, user_id, symbol)
+                )
+            else:
+                c.execute(
+                    'UPDATE watchlists SET order_index = ? WHERE user_id = ? AND symbol = ?',
+                    (idx, user_id, symbol)
+                )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error reordering watchlist: {e}")
         return False
 
 def remove_from_watchlist(user_id, symbol):
