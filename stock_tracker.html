@@ -2941,7 +2941,12 @@
                         <td class="price">₹${currentValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                         <td>${portfolioPct.toFixed(2)}%</td>
                         <td>
-                            <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromPortfolio(${stock.id})">Remove</button>
+                            <button
+                            onclick="removeFromPortfolio(${stock.id})"
+                            title="Remove"
+                            style="background:none;border:1px solid rgba(239,68,68,0.4);border-radius:6px;color:#ef4444;cursor:pointer;padding:0.35rem 0.5rem;font-size:1.1rem;line-height:1;transition:background 0.2s,border-color 0.2s;"
+                            onmouseenter="this.style.background='rgba(239,68,68,0.15)';this.style.borderColor='#ef4444';"
+                            onmouseleave="this.style.background='none';this.style.borderColor='rgba(239,68,68,0.4)';">🗑️</button>
                         </td>
                     </tr>
                 `;
