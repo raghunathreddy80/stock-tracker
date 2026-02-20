@@ -1332,11 +1332,24 @@
             document.querySelectorAll(`.${type}-checkbox`).forEach(cb => cb.checked = checked);
         }
 
+        function setDeepDiveReadingState(isReading) {
+            // Disable/enable company selector
+            document.getElementById('ddStockSelect').disabled = isReading;
+            // Disable/enable all doc checkboxes (individual + select-all)
+            document.querySelectorAll('#ddSources input[type="checkbox"]').forEach(cb => {
+                cb.disabled = isReading;
+            });
+            // Disable/enable the Read button itself
+            const readBtn = document.querySelector('#ddSources .btn');
+            if (readBtn) readBtn.disabled = isReading;
+        }
+
         async function fetchDocumentText() {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxy();
-                
-                // Get only SELECTED documents based on checkboxes
+
+                // Disable UI while reading
+                setDeepDiveReadingState(true);
                 const docsToFetch = [];
                 
                 // Get selected annual reports
@@ -1380,6 +1393,7 @@
                 
                 if (docsToFetch.length === 0) {
                     document.getElementById('ddChatStatus').textContent = 'No documents to fetch';
+                    setDeepDiveReadingState(false);
                     return;
                 }
                 
@@ -1440,11 +1454,16 @@
                 statusMsg += ` Ask me anything about the company!`;
                 
                 ddAddSystemMessage(statusMsg);
-                
+
+                // Re-enable UI after reading completes
+                setDeepDiveReadingState(false);
+
             } catch (error) {
                 console.error('Fetch docs error:', error);
                 document.getElementById('ddChatStatus').textContent = `Error fetching documents: ${error.message}`;
                 ddAddSystemMessage(`Could not fetch document text. I can still answer questions using my general knowledge.`);
+                // Re-enable UI even on error
+                setDeepDiveReadingState(false);
             }
         }
 
@@ -1750,6 +1769,14 @@
     (async function() {
         try {
             const response = await fetch(API_URL + '/auth/check', { credentials: 'include' });
+
+            // If server returned HTML (e.g. login redirect page) instead of JSON, treat as unauthenticated
+            const contentType = response.headers.get('content-type') || '';
+            if (!contentType.includes('application/json')) {
+                window.location.href = '/login.html';
+                return;
+            }
+
             const data = await response.json();
             
             if (!data.authenticated) {
@@ -1770,7 +1797,10 @@
             body.insertBefore(userInfo, body.firstChild);
         } catch (error) {
             console.error('Auth check failed:', error);
-            window.location.href = '/login.html';
+            // Only redirect on network errors, not parse errors — avoids redirect loops
+            if (error instanceof TypeError) {
+                window.location.href = '/login.html';
+            }
         }
     })();
     
@@ -2382,23 +2412,61 @@
             });
         }
 
+        function isMarketOpen() {
+            // Check if Indian market (NSE/BSE) is currently open
+            // Market hours: Monday–Friday, 09:00–16:00 IST
+            const now = new Date();
+            const istOffset = 5.5 * 60; // IST = UTC+5:30
+            const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+            const istMinutes = (utcMinutes + istOffset) % (24 * 60);
+            const istDay = (() => {
+                // Compute IST day of week
+                const istMs = now.getTime() + (istOffset * 60000);
+                return new Date(istMs).getUTCDay(); // 0=Sun, 6=Sat
+            })();
+            const marketOpen  = 9 * 60;   // 09:00 IST
+            const marketClose = 16 * 60;  // 16:00 IST
+            const isWeekday   = istDay >= 1 && istDay <= 5;
+            return isWeekday && istMinutes >= marketOpen && istMinutes < marketClose;
+        }
+
+        let pricesUpdatedOffMarket = false; // tracks if we've done the one-time off-hours update
+
         async function updatePrices() {
             if (watchlist.length === 0 && portfolio.length === 0) return;
-            
-            console.log('🔄 Auto-refreshing prices...');
+
+            const marketOpen = isMarketOpen();
+
+            // Outside market hours: only update once, then stop
+            if (!marketOpen) {
+                if (pricesUpdatedOffMarket) {
+                    console.log('⏸ Market closed – prices already up to date, skipping refresh.');
+                    return;
+                }
+                console.log('🔄 Market closed – doing one-time price update...');
+            } else {
+                console.log('🔄 Auto-refreshing prices (market open)...');
+            }
+
             document.getElementById('updateIndicator').style.display = 'flex';
             document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Refreshing prices...</span>';
-            
+
             try {
                 // Reload watchlist and portfolio from database (backend fetches fresh prices)
                 await loadFromStorage();
-                
+
                 // Re-render both
                 renderWatchlist();
                 renderPortfolio();
                 updatePortfolioChart();
-                
-                console.log('✓ Prices refreshed');
+
+                if (!marketOpen) {
+                    pricesUpdatedOffMarket = true; // mark done for this off-market session
+                    console.log('✓ Off-market price snapshot taken – no further updates until market opens.');
+                } else {
+                    pricesUpdatedOffMarket = false; // reset so we snapshot again after market closes
+                    console.log('✓ Prices refreshed');
+                }
             } catch (error) {
                 console.error('Update error:', error);
             } finally {
@@ -2624,8 +2692,10 @@
         }
         window.addEventListener('load', init);
 
-        document.getElementById('proxyHostInput').addEventListener('change', saveProxySettings);
-        document.getElementById('proxyPortInput').addEventListener('change', saveProxySettings);
+        const _phi = document.getElementById('proxyHostInput');
+        const _ppi = document.getElementById('proxyPortInput');
+        if (_phi) _phi.addEventListener('change', saveProxySettings);
+        if (_ppi) _ppi.addEventListener('change', saveProxySettings);
     </script>
     <!-- Fullscreen answer modal -->
     <div id="ddFullscreenModal">

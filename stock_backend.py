@@ -16,7 +16,7 @@ for pkg, imp in [('flask','flask'),('flask-cors','flask_cors'),
         print(f"Installing {pkg}…")
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, redirect
 from flask_cors import CORS
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from auth import (init_db, create_user, verify_user, get_user_by_id, 
@@ -121,7 +121,16 @@ CORS(app)
 # Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
+login_manager.login_view = 'login_page'
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production')
+
+@login_manager.unauthorized_handler
+def unauthorized():
+    """Return JSON 401 for API routes, redirect to login for browser requests."""
+    from flask import request as flask_request
+    if flask_request.path.startswith('/api/'):
+        return jsonify({'authenticated': False, 'error': 'Login required'}), 401
+    return redirect('/login.html')
 
 # Initialize database
 init_db()
