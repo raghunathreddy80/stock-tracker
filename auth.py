@@ -66,10 +66,13 @@ def init_db():
             )
         ''')
         # Add order_index column if it doesn't exist (for existing databases)
+        # In PostgreSQL, a failed statement aborts the whole transaction.
+        # We must rollback on failure so subsequent statements can proceed.
         try:
             c.execute('ALTER TABLE watchlists ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0')
+            conn.commit()
         except Exception:
-            pass  # Column already exists
+            conn.rollback()  # Column already exists — reset transaction
         
         c.execute('''
             CREATE TABLE IF NOT EXISTS portfolio (
