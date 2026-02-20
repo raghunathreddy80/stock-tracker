@@ -1199,6 +1199,8 @@
                 padding: 8px;
                 flex-shrink: 0;
                 transition: background 0.2s;
+                position: relative;
+                z-index: 10000;
             }
             .hamburger-btn:active { background: var(--bg-tertiary); }
             .hamburger-btn span {
@@ -1306,12 +1308,12 @@
             .mobile-nav-item .nav-label { font-size: 0.92rem; }
 
             /* User info + logout at bottom of nav */
-            .mobile-nav-footer {
-                padding: 1rem 0.8rem;
-                border-top: 1px solid var(--border-color);
-                display: flex;
+            .mobile-nav-footer.populated {
+                display: flex !important;
                 flex-direction: column;
                 gap: 0.6rem;
+                padding: 1rem 0.8rem;
+                border-top: 1px solid var(--border-color);
             }
             .mobile-nav-user {
                 display: flex;
@@ -1398,7 +1400,7 @@
         </div>
 
         <!-- User info + logout at bottom of nav -->
-        <div class="mobile-nav-footer" id="mobileNavFooter" style="display:none;">
+        <div class="mobile-nav-footer" id="mobileNavFooter">
             <div class="mobile-nav-user" id="mobileNavUser"></div>
             <button class="mobile-nav-logout" onclick="logout()">
                 <span>🚪</span> Logout
@@ -1445,18 +1447,17 @@
                 <table>
                     <thead>
                         <tr>
-                            <th style="width:60px;text-align:center;">Order</th>
                             <th>Company</th>
                             <th>Price (₹)</th>
-                            <th>Change (₹)</th>
-                            <th>Change (%)</th>
+                            <th>Change</th>
                             <th>Volume</th>
                             <th>Action</th>
+                            <th style="width:60px;text-align:center;">Order</th>
                         </tr>
                     </thead>
                     <tbody id="watchlistTable">
                         <tr>
-                            <td colspan="7" class="empty-state">
+                            <td colspan="6" class="empty-state">
                                 <div class="empty-state-icon">📈</div>
                                 <p>No stocks in watchlist. Add stocks to start tracking.</p>
                             </td>
@@ -2380,17 +2381,16 @@
             }
             
             // Add username and logout button
-            const isMobile = window.innerWidth <= 768;
+            // Always populate mobile nav footer (CSS hides it on desktop)
+            const footer = document.getElementById('mobileNavFooter');
+            const userEl = document.getElementById('mobileNavUser');
+            if (footer && userEl) {
+                userEl.innerHTML = `<span style="font-size:1.1rem;">👤</span> ${data.username}`;
+                footer.classList.add('populated');
+            }
 
-            if (isMobile) {
-                // Show user info inside hamburger menu
-                const footer = document.getElementById('mobileNavFooter');
-                const userEl = document.getElementById('mobileNavUser');
-                if (footer && userEl) {
-                    userEl.innerHTML = `<span style="font-size:1.1rem;">👤</span> ${data.username}`;
-                    footer.style.display = 'flex';
-                }
-            } else {
+            const isMobile = window.innerWidth <= 768;
+            if (!isMobile) {
                 // Desktop: fixed top-right overlay
                 const body = document.body;
                 const userInfo = document.createElement('div');
@@ -2717,7 +2717,7 @@
             if (watchlist.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="7" class="empty-state">
+                        <td colspan="6" class="empty-state">
                             <div class="empty-state-icon">📈</div>
                             <p>No stocks in watchlist. Add stocks to start tracking.</p>
                         </td>
@@ -2737,8 +2737,28 @@
             tbody.innerHTML = watchlist.map((stock, idx) => {
                 const isFirst = idx === 0;
                 const isLast  = idx === watchlist.length - 1;
+                const changeClass = stock.change >= 0 ? 'change-positive' : 'change-negative';
+                const changeSign = stock.change >= 0 ? '+' : '';
+                const pctSign = stock.changePercent >= 0 ? '+' : '';
                 return `
                 <tr data-symbol="${stock.symbol}" data-table="watchlist">
+                    <td>
+                        <div class="company-name">${stock.name}</div>
+                    </td>
+                    <td class="price">₹${stock.price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                    <td class="${changeClass}">
+                        <div>${changeSign}${stock.change.toFixed(2)}</div>
+                        <div style="font-size:0.8em;opacity:0.85;">(${pctSign}${stock.changePercent.toFixed(2)}%)</div>
+                    </td>
+                    <td>${stock.volume.toLocaleString('en-IN')}</td>
+                    <td>
+                        <button
+                            onclick="removeFromWatchlist('${stock.symbol}')"
+                            title="Remove"
+                            style="background:none;border:1px solid rgba(239,68,68,0.4);border-radius:6px;color:#ef4444;cursor:pointer;padding:0.35rem 0.5rem;font-size:1.1rem;line-height:1;transition:background 0.2s,border-color 0.2s;"
+                            onmouseenter="this.style.background='rgba(239,68,68,0.15)';this.style.borderColor='#ef4444';"
+                            onmouseleave="this.style.background='none';this.style.borderColor='rgba(239,68,68,0.4)';">🗑️</button>
+                    </td>
                     <td style="text-align:center;padding:0.8rem 0.5rem;">
                         <div style="display:inline-flex;flex-direction:column;gap:2px;align-items:center;">
                             <button
@@ -2756,22 +2776,6 @@
                                 onmouseenter="if(!this.disabled)this.style.borderColor='var(--accent-primary)',this.style.color='var(--accent-primary)'"
                                 onmouseleave="this.style.borderColor='var(--border-color)',this.style.color='var(--text-secondary)'">▼</button>
                         </div>
-                    </td>
-                    <td>
-                        <div class="company-name">${stock.name}</div>
-                    </td>
-                    <td class="price">₹${stock.price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                    <td class="${stock.change >= 0 ? 'change-positive' : 'change-negative'}">
-                        ${stock.change >= 0 ? '+' : ''}${stock.change.toFixed(2)}
-                    </td>
-                    <td>
-                        <span class="badge ${stock.changePercent >= 0 ? 'badge-success' : 'badge-danger'}">
-                            ${stock.changePercent >= 0 ? '▲' : '▼'} ${Math.abs(stock.changePercent).toFixed(2)}%
-                        </span>
-                    </td>
-                    <td>${stock.volume.toLocaleString('en-IN')}</td>
-                    <td>
-                        <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.9rem;" onclick="removeFromWatchlist('${stock.symbol}')">Remove</button>
                     </td>
                 </tr>`;
             }).join('');
