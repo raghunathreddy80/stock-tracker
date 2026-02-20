@@ -726,6 +726,20 @@
         .dd-send-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         .dd-loading { color: var(--text-secondary); font-size: 0.85rem; padding: 0.5rem 0; }
 
+        /* Streaming cursor effect */
+        .dd-streaming-bubble::after {
+            content: '▋';
+            display: inline-block;
+            color: var(--accent-primary);
+            animation: ddBlink 0.7s infinite;
+            margin-left: 2px;
+            font-size: 0.85em;
+        }
+        @keyframes ddBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
         .dd-view-btn {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -1912,23 +1926,72 @@
                     body: JSON.stringify({
                         question: question,
                         context: ddContext,
-                        messages: ddChatHistory.slice(0, -1), // Exclude current question
+                        messages: ddChatHistory.slice(0, -1),
                         proxy_host: proxyHost,
-                        proxy_port: proxyPort
+                        proxy_port: proxyPort,
+                        stream: true
                     })
                 });
 
                 ddRemoveTyping(typingId);
 
-                if (resp.ok) {
-                    const data = await resp.json();
-                    const answer = data.answer || 'No response received.';
-                    ddAppendMessage('ai', answer);
-                    ddChatHistory.push({ role: 'assistant', content: answer });
-                } else {
+                if (!resp.ok) {
                     const errorData = await resp.json().catch(() => ({}));
                     ddAppendMessage('ai', `⚠️ Error: ${errorData.error || 'Unknown error'}`);
+                    btn.disabled = false;
+                    return;
                 }
+
+                // ── Streaming response ──────────────────────────────
+                const msgs = document.getElementById('ddMessages');
+                const msgDiv = document.createElement('div');
+                msgDiv.className = 'dd-message ai';
+                msgDiv.innerHTML = `
+                    <div class="dd-avatar">🤖</div>
+                    <div class="dd-bubble dd-streaming-bubble"></div>
+                `;
+                msgs.appendChild(msgDiv);
+                const bubble = msgDiv.querySelector('.dd-streaming-bubble');
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = '';
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete line
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data:')) continue;
+                        const raw = line.slice(5).trim();
+                        if (raw === '[DONE]') break;
+                        try {
+                            const chunk = JSON.parse(raw);
+                            if (chunk.error) {
+                                bubble.innerHTML = `⚠️ Error: ${chunk.error}`;
+                                break;
+                            }
+                            if (chunk.text) {
+                                fullText += chunk.text;
+                                bubble.innerHTML = ddFormatText(fullText);
+                                msgs.scrollTop = msgs.scrollHeight;
+                            }
+                        } catch(e) {}
+                    }
+                }
+
+                // Final render and save to history
+                if (fullText) {
+                    bubble.innerHTML = ddFormatText(fullText);
+                    ddChatHistory.push({ role: 'assistant', content: fullText });
+                }
+                msgs.scrollTop = msgs.scrollHeight;
+
             } catch(e) {
                 ddRemoveTyping(typingId);
                 ddAppendMessage('ai', `⚠️ Connection error: ${e.message}`);

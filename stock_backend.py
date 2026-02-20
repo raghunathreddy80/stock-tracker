@@ -2651,28 +2651,27 @@ def deepdive_fetch_docs():
 @app.route('/api/deepdive/ask', methods=['POST'])
 def deepdive_ask():
     """
-    Ask ChatGPT a question with document context.
-    Expects: {question, context, messages, proxy_host, proxy_port}
-    Returns: {answer}
+    Ask Gemini with streaming support.
+    Expects: {question, context, messages, proxy_host, proxy_port, stream}
+    Returns: SSE stream or {answer}
     """
     try:
         data = request.get_json() or {}
         question = data.get('question', '').strip()
-        context = data.get('context', '')  # Document text
-        messages = data.get('messages', [])  # Chat history
+        context = data.get('context', '')
+        messages = data.get('messages', [])
         proxy_host = data.get('proxy_host', '').strip()
         proxy_port = data.get('proxy_port', '').strip()
-        
+        use_stream = data.get('stream', True)
+
         if not question:
             return jsonify({'error': 'No question provided'}), 400
-        
+
         proxies = make_proxies(proxy_host, proxy_port)
-        
+
         print(f"\n[Deep Dive Ask] Question: {question[:100]}")
-        print(f"  Context length: {len(context)} chars")
-        print(f"  Chat history: {len(messages)} messages")
-        
-        # Build system prompt with context
+        print(f"  Context length: {len(context)} chars, Streaming: {use_stream}")
+
         system_prompt = """You are a financial analysis AI assistant. You have access to company documents including annual reports, earnings call transcripts, and investor presentations.
 
 Answer questions based on the provided documents. Be specific and cite which document you're referencing. If the information is not in the documents, say so clearly.
@@ -2683,109 +2682,102 @@ Use a professional but conversational tone. Format your responses with:
 - Clear section headers when appropriate
 
 Document context:
-""" + context[:100000]  # Gemini has 1M token context window!
-        
-        # Get API key
+""" + context[:100000]
+
         api_key = os.environ.get('GEMINI_API_KEY', '').strip()
-        
         if not api_key:
-            return jsonify({'error': 'GEMINI_API_KEY environment variable not set. Get free key at https://aistudio.google.com/apikey', 'answer': ''}), 500
-        
-        print(f"  Gemini API key: {api_key[:20]}...{api_key[-10:]}")
-        
-        # Call Google Gemini API (using v1beta)
-        # Using gemini-2.5-flash-lite for better free tier limits
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-        
-        # Build messages - Gemini uses different format
-        # Combine system prompt and chat history
+            return jsonify({'error': 'GEMINI_API_KEY not set', 'answer': ''}), 500
+
         conversation_text = system_prompt + "\n\n"
-        
-        # Add chat history
         for msg in messages:
             role = msg.get('role', 'user')
-            content = msg.get('content', '')
+            content_msg = msg.get('content', '')
             if role == 'user':
-                conversation_text += f"User: {content}\n\n"
+                conversation_text += f"User: {content_msg}\n\n"
             elif role == 'assistant':
-                conversation_text += f"Assistant: {content}\n\n"
-        
-        # Add current question
+                conversation_text += f"Assistant: {content_msg}\n\n"
         conversation_text += f"User: {question}\n\nAssistant:"
-        
+
         payload = {
-            'contents': [{
-                'parts': [{
-                    'text': conversation_text
-                }]
-            }],
-            'generationConfig': {
-                'temperature': 0.7,
-                'maxOutputTokens': 8192,
-                'topP': 0.95,
-            }
+            'contents': [{'parts': [{'text': conversation_text}]}],
+            'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 8192, 'topP': 0.95}
         }
-        
-        print(f"  Calling Gemini API (gemini-2.5-flash-lite)...")
-        
-        # Retry logic for rate limits
-        max_retries = 3
-        for attempt in range(max_retries):
-            resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
-            
-            if resp.ok:
-                break  # Success
-            
-            # Check if it's a rate limit error
-            if resp.status_code == 429:
-                if attempt < max_retries - 1:
-                    # Extract retry time from error message
-                    import re, time
-                    retry_match = re.search(r'retry in ([\d.]+)s', resp.text)
-                    wait_time = float(retry_match.group(1)) if retry_match else 5
-                    print(f"  Rate limited. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
-                    time.sleep(wait_time)
+
+        if use_stream:
+            stream_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key={api_key}"
+
+            def generate():
+                import json as _json
+                try:
+                    with req.post(stream_url, json=payload, stream=True, timeout=120, proxies=proxies) as r:
+                        if not r.ok:
+                            yield f"data: {_json.dumps({'error': f'Gemini error: {r.status_code}'})}\n\n"
+                            return
+                        for line in r.iter_lines():
+                            if not line:
+                                continue
+                            line = line.decode('utf-8') if isinstance(line, bytes) else line
+                            if line.startswith('data:'):
+                                raw = line[5:].strip()
+                                if raw == '[DONE]':
+                                    yield f"data: [DONE]\n\n"
+                                    return
+                                try:
+                                    chunk = _json.loads(raw)
+                                    candidates = chunk.get('candidates', [])
+                                    if candidates:
+                                        parts = candidates[0].get('content', {}).get('parts', [])
+                                        if parts:
+                                            text = parts[0].get('text', '')
+                                            if text:
+                                                yield f"data: {_json.dumps({'text': text})}\n\n"
+                                except Exception:
+                                    pass
+                    yield f"data: [DONE]\n\n"
+                except Exception as e:
+                    yield f"data: {_json.dumps({'error': str(e)})}\n\n"
+
+            from flask import Response
+            return Response(generate(), mimetype='text/event-stream',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+        else:
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            max_retries = 3
+            for attempt in range(max_retries):
+                resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
+                if resp.ok:
+                    break
+                if resp.status_code == 429:
+                    if attempt < max_retries - 1:
+                        import re, time
+                        retry_match = re.search(r'retry in ([\d.]+)s', resp.text)
+                        wait_time = float(retry_match.group(1)) if retry_match else 5
+                        time.sleep(wait_time)
+                    else:
+                        return jsonify({'error': 'Rate limit exceeded. Please wait.', 'answer': ''}), 429
                 else:
-                    # Last attempt failed
-                    return jsonify({
-                        'error': 'Gemini API rate limit exceeded. Please wait a moment and try again.',
-                        'answer': ''
-                    }), 429
-            else:
-                # Other error
-                error_detail = resp.text[:500]
-                return jsonify({'error': f'Gemini API error: HTTP {resp.status_code} - {error_detail}', 'answer': ''}), 500
-        
-        if not resp.ok:
-            return jsonify({'error': 'Failed after retries', 'answer': ''}), 500
-        
-        result = resp.json()
-        
-        # Extract answer from Gemini response
-        answer = ''
-        try:
-            candidates = result.get('candidates', [])
-            if candidates:
-                content = candidates[0].get('content', {})
-                parts = content.get('parts', [])
-                if parts:
-                    answer = parts[0].get('text', '')
-        except Exception as e:
-            print(f"  Error parsing Gemini response: {e}")
+                    return jsonify({'error': f'Gemini error: HTTP {resp.status_code}', 'answer': ''}), 500
+
+            result = resp.json()
             answer = ''
-        
-        if not answer:
-            return jsonify({'error': 'No response from Gemini', 'answer': ''}), 500
-        
-        print(f"  Response length: {len(answer)} chars")
-        
-        return jsonify({'answer': answer})
-        
+            try:
+                candidates = result.get('candidates', [])
+                if candidates:
+                    parts = candidates[0].get('content', {}).get('parts', [])
+                    if parts:
+                        answer = parts[0].get('text', '')
+            except Exception as e:
+                print(f"  Parse error: {e}")
+
+            if not answer:
+                return jsonify({'error': 'No response from Gemini', 'answer': ''}), 500
+            return jsonify({'answer': answer})
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e), 'answer': ''}), 500
-
 
 @app.route('/api/debug/bse', methods=['POST'])
 def debug_bse():
