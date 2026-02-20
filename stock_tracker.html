@@ -1644,12 +1644,17 @@
 
             const typingId = ddShowTyping();
 
+            // Abort after 60 seconds
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
+
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxy();
 
                 const resp = await fetch(`${API_URL}/deepdive/ask`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: controller.signal,
                     body: JSON.stringify({
                         question: question,
                         context: ddContext,
@@ -1659,6 +1664,7 @@
                     })
                 });
 
+                clearTimeout(timeoutId);
                 ddRemoveTyping(typingId);
 
                 if (resp.ok) {
@@ -1692,8 +1698,15 @@
                     ddAppendMessage('ai', `⚠️ Error: ${errorData.error || 'Unknown error'}`);
                 }
             } catch(e) {
+                clearTimeout(timeoutId);
                 ddRemoveTyping(typingId);
-                ddAppendMessage('ai', `⚠️ Connection error: ${e.message}`);
+                if (e.name === 'AbortError') {
+                    ddAppendMessage('ai', `⏱️ **Request timed out after 60 seconds.**\n\nThe server took too long to respond. This can happen with large documents or when the AI is busy. Please try again.`);
+                    input.value = question; // restore question for easy retry
+                    ddChatHistory.pop();
+                } else {
+                    ddAppendMessage('ai', `⚠️ Connection error: ${e.message}`);
+                }
             }
 
             btn.disabled = false;

@@ -2676,7 +2676,7 @@ Document context:
         max_retries = 5
         base_wait = 15  # seconds — Gemini free tier needs ~15s between requests
         for attempt in range(max_retries):
-            resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
+            resp = req.post(api_url, json=payload, timeout=55, proxies=proxies)
             
             if resp.ok:
                 break  # Success
