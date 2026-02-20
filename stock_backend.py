@@ -2672,7 +2672,9 @@ Document context:
         print(f"  Calling Gemini API (gemini-2.5-flash-lite)...")
         
         # Retry logic for rate limits
-        max_retries = 3
+        import re, time
+        max_retries = 5
+        base_wait = 15  # seconds — Gemini free tier needs ~15s between requests
         for attempt in range(max_retries):
             resp = req.post(api_url, json=payload, timeout=60, proxies=proxies)
             
@@ -2682,17 +2684,21 @@ Document context:
             # Check if it's a rate limit error
             if resp.status_code == 429:
                 if attempt < max_retries - 1:
-                    # Extract retry time from error message
-                    import re, time
-                    retry_match = re.search(r'retry in ([\d.]+)s', resp.text)
-                    wait_time = float(retry_match.group(1)) if retry_match else 5
+                    # Prefer retry-after from error body, else exponential backoff
+                    retry_match = re.search(r'retry[_ ](?:after|in)["\s:]+([0-9.]+)', resp.text, re.I)
+                    if retry_match:
+                        wait_time = float(retry_match.group(1))
+                    else:
+                        wait_time = base_wait * (2 ** attempt)  # 15s, 30s, 60s, 120s
+                    wait_time = min(wait_time, 120)  # cap at 2 minutes
                     print(f"  Rate limited. Waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
                     time.sleep(wait_time)
                 else:
-                    # Last attempt failed
+                    # All retries exhausted
                     return jsonify({
-                        'error': 'Gemini API rate limit exceeded. Please wait a moment and try again.',
-                        'answer': ''
+                        'error': 'Gemini API rate limit exceeded. The free tier allows ~15 requests/minute — please wait 30–60 seconds and try again.',
+                        'answer': '',
+                        'rate_limited': True
                     }), 429
             else:
                 # Other error

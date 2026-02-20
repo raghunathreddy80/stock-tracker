@@ -1666,6 +1666,27 @@
                     const answer = data.answer || 'No response received.';
                     ddAppendMessage('ai', answer);
                     ddChatHistory.push({ role: 'assistant', content: answer });
+                } else if (resp.status === 429) {
+                    const errorData = await resp.json().catch(() => ({}));
+                    // Show rate limit message with countdown
+                    const retryMsg = `⏳ **Gemini rate limit hit.** The free tier allows ~15 requests/minute.\n\nWaiting 30 seconds before you can retry...`;
+                    const msgEl = ddAppendMessage('ai', retryMsg);
+                    let secs = 30;
+                    const countdown = setInterval(() => {
+                        secs--;
+                        if (msgEl) msgEl.querySelector('.dd-bubble').innerHTML =
+                            ddFormatText(`⏳ **Gemini rate limit hit.** The free tier allows ~15 requests/minute.\n\nRetry available in **${secs}s**...`);
+                        if (secs <= 0) {
+                            clearInterval(countdown);
+                            if (msgEl) msgEl.querySelector('.dd-bubble').innerHTML =
+                                ddFormatText(`✅ Cooldown done — you can send your question again.`);
+                            btn.disabled = false;
+                        }
+                    }, 1000);
+                    // Restore question so user can resend easily
+                    input.value = question;
+                    ddChatHistory.pop();
+                    return; // keep btn disabled during countdown
                 } else {
                     const errorData = await resp.json().catch(() => ({}));
                     ddAppendMessage('ai', `⚠️ Error: ${errorData.error || 'Unknown error'}`);
@@ -1691,6 +1712,7 @@
             `;
             msgs.appendChild(div);
             msgs.scrollTop = msgs.scrollHeight;
+            return div;
         }
 
         function ddAddSystemMessage(text) {
