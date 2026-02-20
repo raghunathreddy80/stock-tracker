@@ -1290,6 +1290,43 @@
             .mobile-nav-item .nav-icon { font-size: 1.2rem; }
             .mobile-nav-item .nav-label { font-size: 0.92rem; }
 
+            /* User info + logout at bottom of nav */
+            .mobile-nav-footer {
+                padding: 1rem 0.8rem;
+                border-top: 1px solid var(--border-color);
+                display: flex;
+                flex-direction: column;
+                gap: 0.6rem;
+            }
+            .mobile-nav-user {
+                display: flex;
+                align-items: center;
+                gap: 0.7rem;
+                padding: 0.7rem 0.9rem;
+                background: var(--bg-tertiary);
+                border-radius: 10px;
+                color: var(--text-primary);
+                font-size: 0.9rem;
+                font-weight: 500;
+            }
+            .mobile-nav-logout {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 0.5rem;
+                padding: 0.75rem;
+                background: rgba(239,68,68,0.12);
+                border: 1px solid rgba(239,68,68,0.3);
+                border-radius: 10px;
+                color: #ef4444;
+                font-size: 0.9rem;
+                font-weight: 600;
+                cursor: pointer;
+                font-family: inherit;
+                transition: background 0.2s;
+            }
+            .mobile-nav-logout:active { background: rgba(239,68,68,0.25); }
+
             /* Overlay behind nav */
             .mobile-nav-overlay {
                 display: none;
@@ -1348,6 +1385,14 @@
             <button class="mobile-nav-item" onclick="switchTabMobile(3)">
                 <span class="nav-icon">🔬</span>
                 <span class="nav-label">Deep Dive</span>
+            </button>
+        </div>
+
+        <!-- User info + logout at bottom of nav -->
+        <div class="mobile-nav-footer" id="mobileNavFooter" style="display:none;">
+            <div class="mobile-nav-user" id="mobileNavUser"></div>
+            <button class="mobile-nav-logout" onclick="logout()">
+                <span>🚪</span> Logout
             </button>
         </div>
     </div>
@@ -2204,8 +2249,9 @@
                     }
                 }
 
-                // Final render and save to history
+                // Final render and save to history — remove cursor
                 if (fullText) {
+                    bubble.classList.remove('dd-streaming-bubble');
                     bubble.innerHTML = ddFormatText(fullText);
                     ddChatHistory.push({ role: 'assistant', content: fullText });
                 }
@@ -2325,16 +2371,29 @@
             }
             
             // Add username and logout button
-            const body = document.body;
-            const userInfo = document.createElement('div');
-            userInfo.style.cssText = 'position:fixed;top:1rem;right:1rem;display:flex;align-items:center;gap:1rem;z-index:9999;background:rgba(0,0,0,0.5);padding:0.5rem 1rem;border-radius:8px;';
-            userInfo.innerHTML = `
-                <span style="color:white;font-weight:500;">👤 ${data.username}</span>
-                <button onclick="logout()" style="padding:0.5rem 1rem;background:#ff4444;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:500;">
-                    Logout
-                </button>
-            `;
-            body.insertBefore(userInfo, body.firstChild);
+            const isMobile = window.innerWidth <= 768;
+
+            if (isMobile) {
+                // Show user info inside hamburger menu
+                const footer = document.getElementById('mobileNavFooter');
+                const userEl = document.getElementById('mobileNavUser');
+                if (footer && userEl) {
+                    userEl.innerHTML = `<span style="font-size:1.1rem;">👤</span> ${data.username}`;
+                    footer.style.display = 'flex';
+                }
+            } else {
+                // Desktop: fixed top-right overlay
+                const body = document.body;
+                const userInfo = document.createElement('div');
+                userInfo.style.cssText = 'position:fixed;top:1rem;right:1rem;display:flex;align-items:center;gap:1rem;z-index:9999;background:rgba(0,0,0,0.5);padding:0.5rem 1rem;border-radius:8px;';
+                userInfo.innerHTML = `
+                    <span style="color:white;font-weight:500;">👤 ${data.username}</span>
+                    <button onclick="logout()" style="padding:0.5rem 1rem;background:#ff4444;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:500;">
+                        Logout
+                    </button>
+                `;
+                body.insertBefore(userInfo, body.firstChild);
+            }
         } catch (error) {
             console.error('Auth check failed:', error);
             window.location.href = '/login.html';
