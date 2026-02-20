@@ -885,6 +885,18 @@
             border-color: var(--accent-primary);
         }
         
+        /* Price flash animations for live updates */
+        @keyframes flashUp {
+            0%   { background: rgba(16, 185, 129, 0.3); }
+            100% { background: transparent; }
+        }
+        @keyframes flashDown {
+            0%   { background: rgba(239, 68, 68, 0.3); }
+            100% { background: transparent; }
+        }
+        .price-flash-up   { animation: flashUp   0.8s ease-out; }
+        .price-flash-down { animation: flashDown 0.8s ease-out; }
+
         /* Hamburger + mobile nav - hidden on desktop by default */
         .hamburger-btn,
         .mobile-header-row,
@@ -2727,7 +2739,7 @@
                 const isFirst = idx === 0;
                 const isLast  = idx === watchlist.length - 1;
                 return `
-                <tr>
+                <tr data-symbol="${stock.symbol}" data-table="watchlist">
                     <td style="text-align:center;padding:0.8rem 0.5rem;">
                         <div style="display:inline-flex;flex-direction:column;gap:2px;align-items:center;">
                             <button
@@ -2917,7 +2929,7 @@
                 
                 const portfolioPct = totalPortfolioValue > 0 ? (currentValue / totalPortfolioValue * 100) : 0;
                 return `
-                    <tr>
+                    <tr data-symbol="${stock.symbol}" data-table="portfolio">
                         <td>
                             <div class="company-name">${stock.name}</div>
                         </td>
@@ -3061,39 +3073,153 @@
             });
         }
 
+        // ── Fast AJAX Price Polling ──────────────────────────────────
+        let priceCache = {};       // symbol -> last known price data
+        let pollingActive = false;
+
+        async function pollPrices() {
+            if (pollingActive) return;
+            const allSymbols = [
+                ...watchlist.map(s => s.symbol),
+                ...portfolio.map(s => s.symbol)
+            ];
+            const symbols = [...new Set(allSymbols)].filter(Boolean);
+            if (symbols.length === 0) return;
+
+            pollingActive = true;
+            const { host: proxyHost, port: proxyPort } = parseProxy();
+
+            try {
+                const resp = await fetch(`${API_URL}/prices/bulk`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ symbols, proxy_host: proxyHost, proxy_port: proxyPort })
+                });
+
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const prices = data.prices || {};
+
+                let anyChange = false;
+
+                // Update only cells that changed — no full re-render
+                for (const [symbol, pdata] of Object.entries(prices)) {
+                    const prev = priceCache[symbol];
+                    const changed = !prev ||
+                        prev.price !== pdata.price ||
+                        prev.changePercent !== pdata.changePercent;
+
+                    if (changed) {
+                        anyChange = true;
+                        priceCache[symbol] = pdata;
+                        updatePriceCells(symbol, pdata);
+                    }
+                }
+
+                if (anyChange) updatePortfolioChart();
+
+            } catch (e) {
+                console.error('Price poll error:', e);
+            } finally {
+                pollingActive = false;
+            }
+        }
+
+        function updatePriceCells(symbol, pdata) {
+            const { price, change, changePercent, volume } = pdata;
+            const isUp = change >= 0;
+            const sign = isUp ? '+' : '';
+            const priceStr = `₹${price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            const changeStr = `${sign}${change.toFixed(2)}`;
+            const pctStr = `${sign}${changePercent.toFixed(2)}%`;
+            const volStr = volume ? volume.toLocaleString('en-IN') : '-';
+            const badgeClass = isUp ? 'badge-success' : 'badge-danger';
+            const arrow = isUp ? '▲' : '▼';
+
+            // Update watchlist row
+            const wlRow = document.querySelector(`[data-symbol="${symbol}"][data-table="watchlist"]`);
+            if (wlRow) {
+                const cells = wlRow.querySelectorAll('td');
+                if (cells.length >= 6) {
+                    cells[2].innerHTML = `<span class="price">${priceStr}</span>`;
+                    cells[3].innerHTML = `<span class="${isUp ? 'change-positive' : 'change-negative'}">${changeStr}</span>`;
+                    cells[4].innerHTML = `<span class="badge ${badgeClass}">${arrow} ${Math.abs(changePercent).toFixed(2)}%</span>`;
+                    cells[5].textContent = volStr;
+                    // Flash animation
+                    wlRow.classList.remove('price-flash-up', 'price-flash-down');
+                    void wlRow.offsetWidth;
+                    wlRow.classList.add(isUp ? 'price-flash-up' : 'price-flash-down');
+                }
+            }
+
+            // Update portfolio row
+            const pfRow = document.querySelector(`[data-symbol="${symbol}"][data-table="portfolio"]`);
+            if (pfRow) {
+                const cells = pfRow.querySelectorAll('td');
+                const stock = portfolio.find(s => s.symbol === symbol);
+                if (cells.length >= 5 && stock) {
+                    const qty = stock.quantity || 0;
+                    const totalVal = (price * qty).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                    const totalPort = portfolio.reduce((sum, s) => {
+                        const cp = priceCache[s.symbol];
+                        return sum + (cp ? cp.price * (s.quantity || 0) : 0);
+                    }, 0);
+                    const pct = totalPort > 0 ? ((price * qty / totalPort) * 100).toFixed(1) : '0.0';
+                    cells[1].innerHTML = `<span class="price">${priceStr}</span>`;
+                    cells[3].innerHTML = `<span class="price">₹${totalVal}</span>`;
+                    cells[4].textContent = `${pct}%`;
+                    pfRow.classList.remove('price-flash-up', 'price-flash-down');
+                    void pfRow.offsetWidth;
+                    pfRow.classList.add(isUp ? 'price-flash-up' : 'price-flash-down');
+                }
+                // Update stat cards too
+                updatePortfolioStats();
+            }
+        }
+
+        function updatePortfolioStats() {
+            let totalVal = 0;
+            portfolio.forEach(s => {
+                const cp = priceCache[s.symbol];
+                if (cp) totalVal += cp.price * (s.quantity || 0);
+            });
+            const totalEl = document.getElementById('totalValue');
+            const countEl = document.getElementById('totalStocks');
+            if (totalEl) totalEl.textContent = `₹${totalVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            if (countEl) countEl.textContent = portfolio.length;
+        }
+
         async function updatePrices() {
             if (watchlist.length === 0 && portfolio.length === 0) return;
-            
-            console.log('🔄 Auto-refreshing prices...');
-            document.getElementById('updateIndicator').style.display = 'flex';
-            document.getElementById('updateIndicator').innerHTML = '<div class="loading"></div><span>Refreshing prices...</span>';
-            
+            console.log('🔄 Full refresh...');
             try {
-                // Reload watchlist and portfolio from database (backend fetches fresh prices)
                 await loadFromStorage();
-                
-                // Re-render both
                 renderWatchlist();
                 renderPortfolio();
                 updatePortfolioChart();
-                
-                console.log('✓ Prices refreshed');
+                // Seed the cache after full render
+                await pollPrices();
             } catch (error) {
                 console.error('Update error:', error);
-            } finally {
-                document.getElementById('updateIndicator').style.display = 'none';
             }
         }
 
         let announcementInterval = null;
-        let knownAnnouncementIds = new Set(); // tracks seen announcements
+        let knownAnnouncementIds = new Set();
         let announcementsInitialized = false;
 
         function startAutoUpdate() {
-            // Prices every 30 seconds
+            // Fast price polling every 5 seconds (AJAX-style, in-place updates)
+            setInterval(pollPrices, 5000);
+
+            // Full data refresh every 5 minutes (re-sync with DB)
             updateInterval = setInterval(() => {
-                updatePrices();
-            }, 30000);
+                loadFromStorage().then(() => {
+                    renderWatchlist();
+                    renderPortfolio();
+                });
+            }, 5 * 60 * 1000);
 
             // Announcements every 5 minutes
             announcementInterval = setInterval(() => {

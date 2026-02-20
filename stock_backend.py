@@ -688,6 +688,53 @@ def get_quote():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/prices/bulk', methods=['POST'])
+def get_prices_bulk():
+    """
+    Fetch prices for multiple symbols in parallel.
+    Expects: { symbols: ["TCS.NS", "RELIANCE.NS", ...] }
+    Returns: { prices: { symbol: { price, change, changePercent, volume } } }
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    data = request.get_json() or {}
+    symbols = data.get('symbols', [])
+    proxy_host = data.get('proxy_host', '').strip()
+    proxy_port = data.get('proxy_port', '').strip()
+
+    if not symbols:
+        return jsonify({'prices': {}})
+
+    proxies = make_proxies(proxy_host, proxy_port)
+    if proxies:
+        os.environ['HTTP_PROXY']  = proxies['http']
+        os.environ['HTTPS_PROXY'] = proxies['https']
+    else:
+        os.environ.pop('HTTP_PROXY', None)
+        os.environ.pop('HTTPS_PROXY', None)
+
+    print(f"\n[Bulk Prices] Fetching {len(symbols)} symbols in parallel...")
+    results = {}
+
+    def fetch_one(symbol):
+        try:
+            pdata = get_price_robust(symbol)
+            if pdata:
+                return symbol, pdata
+        except Exception as e:
+            print(f"  Error fetching {symbol}: {e}")
+        return symbol, None
+
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 10)) as executor:
+        futures = {executor.submit(fetch_one, s): s for s in symbols}
+        for future in as_completed(futures):
+            symbol, pdata = future.result()
+            if pdata:
+                results[symbol] = pdata
+
+    print(f"  Got prices for {len(results)}/{len(symbols)} symbols")
+    return jsonify({'prices': results})
+
+
 @app.route('/api/announcements', methods=['POST'])
 def get_announcements():
     """
