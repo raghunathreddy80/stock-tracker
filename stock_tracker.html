@@ -890,9 +890,12 @@
         .mobile-header-row,
         .mobile-nav,
         .mobile-nav-overlay,
-        .mobile-nav-footer { display: none; }
+        .mobile-nav-footer { display: none !important; }
 
         @media (max-width: 768px) {
+            .hamburger-btn,
+            .mobile-header-row { display: flex !important; }
+            .mobile-nav { display: flex !important; flex-direction: column; }
             .container { padding: 0.75rem; }
 
             /* ── Header ─────────────────────────────────────── */
@@ -1341,12 +1344,6 @@
 
             /* Hide desktop header on mobile - replaced by mobile-header-row */
             .header { display: none; }
-
-            /* Show hamburger elements on mobile */
-            .hamburger-btn,
-            .mobile-header-row { display: flex; }
-            .mobile-nav { display: flex; flex-direction: column; }
-            .mobile-nav-overlay { display: none; } /* shown via JS .open class */
 
             /* Hide desktop tabs on mobile */
             .tabs { display: none !important; }
