@@ -2695,7 +2695,7 @@ Document context:
         
         # Call Google Gemini API (using v1beta)
         # Using gemini-2.5-flash-lite for better free tier limits
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         
         # Build messages - Gemini uses different format
         # Combine system prompt and chat history
