@@ -2910,33 +2910,32 @@
                 updatePortfolioStats();
                 return;
             }
-            
+
+            // Use priceCache for current price where available, fallback to stored price
+            const getPrice = (stock) => {
+                const cached = priceCache[stock.symbol];
+                return cached ? cached.price : (stock.current_price || stock.price || 0);
+            };
+
             const totalPortfolioValue = portfolio.reduce((sum, stock) => {
-                const cv = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
-                return sum + cv;
+                return sum + getPrice(stock) * (stock.quantity || 0);
             }, 0);
 
             // Sort by current value descending
             const sortedPortfolio = [...portfolio].sort((a, b) => {
-                const va = (a.current_price || a.price || 0) * (a.quantity || 0);
-                const vb = (b.current_price || b.price || 0) * (b.quantity || 0);
-                return vb - va;
+                return (getPrice(b) * (b.quantity || 0)) - (getPrice(a) * (a.quantity || 0));
             });
             
             tbody.innerHTML = sortedPortfolio.map(stock => {
-                const currentValue = (stock.current_price || stock.price || 0) * (stock.quantity || 0);
-                const investedValue = (stock.buy_price || stock.price || 0) * (stock.quantity || 0);
-                const profitLoss = currentValue - investedValue;
-                const profitLossPercent = investedValue > 0 ? (profitLoss / investedValue * 100) : 0;
-                const profitLossClass = profitLoss >= 0 ? 'positive' : 'negative';
-                
+                const currentPrice = getPrice(stock);
+                const currentValue = currentPrice * (stock.quantity || 0);
                 const portfolioPct = totalPortfolioValue > 0 ? (currentValue / totalPortfolioValue * 100) : 0;
                 return `
                     <tr data-symbol="${stock.symbol}" data-table="portfolio">
                         <td>
                             <div class="company-name">${stock.name}</div>
                         </td>
-                        <td class="price">₹${(stock.current_price || stock.price || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                        <td class="price">₹${currentPrice.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                         <td>${stock.quantity || 0}</td>
                         <td class="price">₹${currentValue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
                         <td>${portfolioPct.toFixed(2)}%</td>
@@ -3169,21 +3168,30 @@
                 if (cells.length >= 5 && stock) {
                     const qty = stock.quantity || 0;
                     const totalVal = (price * qty).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                    const totalPort = portfolio.reduce((sum, s) => {
-                        const cp = priceCache[s.symbol];
-                        return sum + (cp ? cp.price * (s.quantity || 0) : 0);
-                    }, 0);
-                    const pct = totalPort > 0 ? ((price * qty / totalPort) * 100).toFixed(1) : '0.0';
                     cells[1].innerHTML = `<span class="price">${priceStr}</span>`;
                     cells[3].innerHTML = `<span class="price">₹${totalVal}</span>`;
-                    cells[4].textContent = `${pct}%`;
                     pfRow.classList.remove('price-flash-up', 'price-flash-down');
                     void pfRow.offsetWidth;
                     pfRow.classList.add(isUp ? 'price-flash-up' : 'price-flash-down');
                 }
-                // Update stat cards too
                 updatePortfolioStats();
             }
+
+            // Recalculate % column for ALL portfolio rows (total changes when any price changes)
+            const totalPort = portfolio.reduce((sum, s) => {
+                const cp = priceCache[s.symbol];
+                return sum + (cp ? cp.price * (s.quantity || 0) : (s.current_price || s.price || 0) * (s.quantity || 0));
+            }, 0);
+            document.querySelectorAll('[data-table="portfolio"]').forEach(row => {
+                const rowSymbol = row.getAttribute('data-symbol');
+                const rowStock = portfolio.find(s => s.symbol === rowSymbol);
+                if (!rowStock) return;
+                const rowPrice = priceCache[rowSymbol] ? priceCache[rowSymbol].price : (rowStock.current_price || rowStock.price || 0);
+                const rowVal = rowPrice * (rowStock.quantity || 0);
+                const rowPct = totalPort > 0 ? (rowVal / totalPort * 100).toFixed(2) : '0.00';
+                const rowCells = row.querySelectorAll('td');
+                if (rowCells[4]) rowCells[4].textContent = `${rowPct}%`;
+            });
         }
 
         function updatePortfolioStats() {
