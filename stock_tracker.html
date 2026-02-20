@@ -2381,7 +2381,7 @@
             }
             
             // Add username and logout button
-            // Always populate mobile nav footer (CSS hides it on desktop)
+            // Always populate mobile nav footer (CSS hides it on desktop via media query)
             const footer = document.getElementById('mobileNavFooter');
             const userEl = document.getElementById('mobileNavUser');
             if (footer && userEl) {
@@ -3141,14 +3141,14 @@
             const arrow = isUp ? '▲' : '▼';
 
             // Update watchlist row
+            // Column order: Company(0), Price(1), Change(2), Volume(3), Action(4), Order(5)
             const wlRow = document.querySelector(`[data-symbol="${symbol}"][data-table="watchlist"]`);
             if (wlRow) {
                 const cells = wlRow.querySelectorAll('td');
-                if (cells.length >= 6) {
-                    cells[2].innerHTML = `<span class="price">${priceStr}</span>`;
-                    cells[3].innerHTML = `<span class="${isUp ? 'change-positive' : 'change-negative'}">${changeStr}</span>`;
-                    cells[4].innerHTML = `<span class="badge ${badgeClass}">${arrow} ${Math.abs(changePercent).toFixed(2)}%</span>`;
-                    cells[5].textContent = volStr;
+                if (cells.length >= 4) {
+                    cells[1].innerHTML = `<span class="price">${priceStr}</span>`;
+                    cells[2].innerHTML = `<div class="${isUp ? 'change-positive' : 'change-negative'}"><div>${changeStr}</div><div style="font-size:0.8em;opacity:0.85;">(${sign}${changePercent.toFixed(2)}%)</div></div>`;
+                    cells[3].textContent = volStr;
                     // Flash animation
                     wlRow.classList.remove('price-flash-up', 'price-flash-down');
                     void wlRow.offsetWidth;
@@ -3418,7 +3418,7 @@
                         style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:1.2rem;line-height:1;">✕</button>
                 </div>
                 ${list}${more}
-                <button onclick="switchTab(2);document.getElementById('announcementAlert').remove();"
+                <button onclick="if(window.innerWidth<=768){switchTabMobile(2);}else{switchTab(2);}document.getElementById('announcementAlert').remove();"
                     style="margin-top:1rem;width:100%;padding:0.6rem;background:linear-gradient(135deg,var(--accent-primary),var(--accent-secondary));
                     border:none;border-radius:8px;color:#fff;font-weight:600;cursor:pointer;font-size:0.9rem;">
                     View Announcements
