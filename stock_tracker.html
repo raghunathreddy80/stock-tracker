@@ -885,6 +885,12 @@
             border-color: var(--accent-primary);
         }
         
+        /* Hamburger + mobile nav - hidden on desktop by default */
+        .hamburger-btn,
+        .mobile-header-row,
+        .mobile-nav,
+        .mobile-nav-overlay { display: none; }
+
         @media (max-width: 768px) {
             .container { padding: 0.75rem; }
 
@@ -1163,16 +1169,199 @@
             .empty-state-icon { font-size: 2.5rem; }
         }
 
-        /* Extra small screens (iPhone SE etc) */
+            /* ── HAMBURGER MENU (mobile only) ───────────────── */
+            .hamburger-btn {
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                gap: 5px;
+                width: 38px;
+                height: 38px;
+                background: var(--bg-secondary);
+                border: 1px solid var(--border-color);
+                border-radius: 10px;
+                cursor: pointer;
+                padding: 8px;
+                flex-shrink: 0;
+                transition: background 0.2s;
+            }
+            .hamburger-btn:active { background: var(--bg-tertiary); }
+            .hamburger-btn span {
+                display: block;
+                height: 2px;
+                background: var(--text-primary);
+                border-radius: 2px;
+                transition: all 0.3s;
+            }
+            .hamburger-btn.open span:nth-child(1) {
+                transform: translateY(7px) rotate(45deg);
+            }
+            .hamburger-btn.open span:nth-child(2) {
+                opacity: 0;
+            }
+            .hamburger-btn.open span:nth-child(3) {
+                transform: translateY(-7px) rotate(-45deg);
+            }
+
+            /* Mobile header row */
+            .mobile-header-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin-bottom: 0.75rem;
+            }
+
+            /* Current tab title shown in header */
+            .mobile-tab-title {
+                font-size: 0.95rem;
+                font-weight: 600;
+                color: var(--text-primary);
+                flex: 1;
+                text-align: center;
+            }
+
+            /* Dropdown nav menu */
+            .mobile-nav {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 75%;
+                max-width: 280px;
+                height: 100vh;
+                background: var(--bg-secondary);
+                border-right: 1px solid var(--border-color);
+                z-index: 9999;
+                transform: translateX(-100%);
+                transition: transform 0.3s ease;
+                display: flex;
+                flex-direction: column;
+                box-shadow: 4px 0 24px rgba(0,0,0,0.4);
+            }
+            .mobile-nav.open { transform: translateX(0); }
+
+            .mobile-nav-header {
+                padding: 1.5rem 1.2rem 1rem;
+                border-bottom: 1px solid var(--border-color);
+                display: flex;
+                align-items: center;
+                gap: 0.7rem;
+            }
+            .mobile-nav-header .logo-icon {
+                width: 36px; height: 36px; font-size: 1rem;
+            }
+            .mobile-nav-header h2 {
+                font-size: 1rem;
+                font-weight: 700;
+                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+            }
+
+            .mobile-nav-items {
+                flex: 1;
+                padding: 0.75rem 0.6rem;
+                display: flex;
+                flex-direction: column;
+                gap: 0.3rem;
+            }
+            .mobile-nav-item {
+                display: flex;
+                align-items: center;
+                gap: 0.9rem;
+                padding: 0.85rem 1rem;
+                border-radius: 10px;
+                border: none;
+                background: transparent;
+                color: var(--text-secondary);
+                font-size: 0.95rem;
+                font-weight: 500;
+                cursor: pointer;
+                text-align: left;
+                transition: all 0.2s;
+                font-family: inherit;
+            }
+            .mobile-nav-item:active { background: var(--bg-tertiary); }
+            .mobile-nav-item.active {
+                background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(124,58,237,0.15));
+                color: var(--text-primary);
+                border: 1px solid rgba(0,212,255,0.2);
+            }
+            .mobile-nav-item .nav-icon { font-size: 1.2rem; }
+            .mobile-nav-item .nav-label { font-size: 0.92rem; }
+
+            /* Overlay behind nav */
+            .mobile-nav-overlay {
+                display: none;
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.55);
+                z-index: 9998;
+                backdrop-filter: blur(2px);
+            }
+            .mobile-nav-overlay.open { display: block; }
+
+            /* Hide desktop header on mobile - replaced by mobile-header-row */
+            .header { display: none; }
+
+            /* Show hamburger elements on mobile */
+            .hamburger-btn,
+            .mobile-header-row { display: flex; }
+            .mobile-nav { display: flex; }
+            .mobile-nav-overlay { display: none; } /* shown via JS .open class */
+
+            /* Hide desktop tabs on mobile */
+            .tabs { display: none !important; }
+
+            /* Extra small screens (iPhone SE etc) */
+        }
+
         @media (max-width: 380px) {
             .portfolio-stats { grid-template-columns: 1fr; }
-            .tab { font-size: 0.72rem; padding: 0.6rem 0.6rem; }
             .stat-value { font-size: 1.1rem; }
         }
     </style>
 </head>
 <body>
+    <!-- Mobile Nav Overlay -->
+    <div class="mobile-nav-overlay" id="mobileNavOverlay" onclick="closeMobileNav()"></div>
+
+    <!-- Mobile Slide-in Nav -->
+    <div class="mobile-nav" id="mobileNav">
+        <div class="mobile-nav-header">
+            <div class="logo-icon">₹</div>
+            <h2>Stock Tracker Pro</h2>
+        </div>
+        <div class="mobile-nav-items">
+            <button class="mobile-nav-item active" onclick="switchTabMobile(0)">
+                <span class="nav-icon">📊</span>
+                <span class="nav-label">Watchlist</span>
+            </button>
+            <button class="mobile-nav-item" onclick="switchTabMobile(1)">
+                <span class="nav-icon">💼</span>
+                <span class="nav-label">Portfolio</span>
+            </button>
+            <button class="mobile-nav-item" onclick="switchTabMobile(2)">
+                <span class="nav-icon">📢</span>
+                <span class="nav-label">Announcements</span>
+            </button>
+            <button class="mobile-nav-item" onclick="switchTabMobile(3)">
+                <span class="nav-icon">🔬</span>
+                <span class="nav-label">Deep Dive</span>
+            </button>
+        </div>
+    </div>
+
     <div class="container">
+        <!-- Mobile header row (hamburger + title) -->
+        <div class="mobile-header-row">
+            <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMobileNav()">
+                <span></span><span></span><span></span>
+            </button>
+            <div class="mobile-tab-title" id="mobileTabTitle">📊 Watchlist</div>
+            <div style="width:38px;"></div><!-- spacer to center title -->
+        </div>
+
         <div class="header">
             <div class="logo">
                 <div class="logo-icon">₹</div>
@@ -1432,6 +1621,36 @@
             if (index === 1) updatePortfolioChart();
             if (index === 2) updateAnnouncements();
             if (index === 3) initDeepDive();
+        }
+
+        // ── Mobile Nav ───────────────────────────────────────────────
+        const TAB_LABELS = ['📊 Watchlist', '💼 Portfolio', '📢 Announcements', '🔬 Deep Dive'];
+
+        function toggleMobileNav() {
+            const nav = document.getElementById('mobileNav');
+            const overlay = document.getElementById('mobileNavOverlay');
+            const btn = document.getElementById('hamburgerBtn');
+            const isOpen = nav.classList.contains('open');
+            nav.classList.toggle('open', !isOpen);
+            overlay.classList.toggle('open', !isOpen);
+            btn.classList.toggle('open', !isOpen);
+        }
+
+        function closeMobileNav() {
+            document.getElementById('mobileNav').classList.remove('open');
+            document.getElementById('mobileNavOverlay').classList.remove('open');
+            document.getElementById('hamburgerBtn').classList.remove('open');
+        }
+
+        function switchTabMobile(index) {
+            switchTab(index);
+            // Update active state in mobile nav
+            document.querySelectorAll('.mobile-nav-item').forEach((item, i) => {
+                item.classList.toggle('active', i === index);
+            });
+            // Update title in header
+            document.getElementById('mobileTabTitle').textContent = TAB_LABELS[index];
+            closeMobileNav();
         }
 
         // ═══════════════════════════════════════════════════════════
