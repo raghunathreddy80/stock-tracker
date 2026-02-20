@@ -253,13 +253,18 @@ def add_to_watchlist(user_id, symbol, name):
         next_index = c.fetchone()[0]
 
         if USE_POSTGRES:
+            # ON CONFLICT: if the symbol was previously removed but lingered, update it cleanly
             c.execute(
-                'INSERT INTO watchlists (user_id, symbol, name, order_index) VALUES (%s, %s, %s, %s)',
+                '''INSERT INTO watchlists (user_id, symbol, name, order_index)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (user_id, symbol) DO UPDATE
+                   SET name = EXCLUDED.name, order_index = EXCLUDED.order_index''',
                 (user_id, symbol, name, next_index)
             )
         else:
+            # INSERT OR REPLACE handles the unique constraint cleanly for SQLite
             c.execute(
-                'INSERT INTO watchlists (user_id, symbol, name, order_index) VALUES (?, ?, ?, ?)',
+                'INSERT OR REPLACE INTO watchlists (user_id, symbol, name, order_index) VALUES (?, ?, ?, ?)',
                 (user_id, symbol, name, next_index)
             )
 
@@ -296,16 +301,21 @@ def reorder_watchlist(user_id, symbols_in_order):
 
 def remove_from_watchlist(user_id, symbol):
     """Remove stock from user's watchlist"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    if USE_POSTGRES:
-        c.execute('DELETE FROM watchlists WHERE user_id = %s AND symbol = %s', (user_id, symbol))
-    else:
-        c.execute('DELETE FROM watchlists WHERE user_id = ? AND symbol = ?', (user_id, symbol))
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        if USE_POSTGRES:
+            c.execute('DELETE FROM watchlists WHERE user_id = %s AND symbol = %s', (user_id, symbol))
+        else:
+            c.execute('DELETE FROM watchlists WHERE user_id = ? AND symbol = ?', (user_id, symbol))
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error removing from watchlist: {e}")
+        return False
 
 # Portfolio functions
 def get_user_portfolio(user_id):
