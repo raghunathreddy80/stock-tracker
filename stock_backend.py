@@ -2731,8 +2731,15 @@ def extract_text_from_pdf(pdf_url, proxies=None, max_pages=15):
         else:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         
-        resp = req.get(pdf_url, headers=headers, timeout=30, proxies=proxies, stream=True)
-        
+        try:
+            resp = req.get(pdf_url, headers=headers, timeout=30, proxies=proxies, stream=True)
+        except Exception as conn_err:
+            err_str = str(conn_err)
+            if any(x in err_str.lower() for x in ['resolve', 'name or service', 'nodename', 'getaddrinfo']):
+                domain = pdf_url.split('/')[2]
+                return '', f'Server cannot reach {domain} (DNS blocked on Render). The same document may be available on BSE - search https://www.bseindia.com/corporates/ann.html'
+            return '', f'Connection error: {err_str[:120]}'
+
         if not resp.ok:
             return '', f'HTTP {resp.status_code}'
         
@@ -2802,7 +2809,60 @@ def deepdive_fetch_docs():
             
             # Extract text from PDF
             text, error = extract_text_from_pdf(url, proxies)
-            
+
+            # If primary URL failed (DNS block or any network error), try fallbacks
+            if error and not text:
+                # Fallback 1: explicit bse_url passed from frontend
+                if doc.get('bse_url'):
+                    print(f"  Primary URL failed, trying BSE URL: {doc['bse_url'][:80]}")
+                    text, error = extract_text_from_pdf(doc['bse_url'], proxies)
+                    if text:
+                        print(f"  BSE URL fallback succeeded!")
+                        url = doc['bse_url']
+
+                # Fallback 2: search BSE for transcript by symbol + quarter keyword
+                if not text and doc.get('symbol'):
+                    print(f"  Trying BSE search fallback for {doc['symbol']}...")
+                    try:
+                        bse_code = resolve_bse_code(doc['symbol'], proxies)
+                        if bse_code:
+                            BSE_HDR = {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'Accept': 'application/json, text/plain, */*',
+                                'Origin': 'https://www.bseindia.com',
+                                'Referer': 'https://www.bseindia.com/',
+                                'sec-fetch-site': 'same-site',
+                                'sec-fetch-mode': 'cors',
+                            }
+                            from urllib.parse import quote as _uq
+                            cat = _uq('Earnings Call Transcript')
+                            r = req.get(
+                                f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
+                                f"?strCat=-1&strPrevDate=&strScrip={bse_code}&strSearch=P&strToDate=&strType=C",
+                                headers=BSE_HDR, timeout=15, proxies=proxies)
+                            if r and r.ok:
+                                items = r.json()
+                                items = items if isinstance(items, list) else items.get('Table', [])
+                                # Find transcript items
+                                for item in items[:20]:
+                                    headline = (item.get('HEADLINE') or item.get('NEWSSUB') or '').lower()
+                                    if 'transcript' in headline or 'concall' in headline or 'earnings call' in headline:
+                                        news_id = str(item.get('NEWSID') or '').strip()
+                                        att = (item.get('ATTACHMENTNAME') or '').strip()
+                                        if att:
+                                            bse_pdf = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{att}"
+                                            print(f"  BSE search found transcript: {bse_pdf[:80]}")
+                                            text, error = extract_text_from_pdf(bse_pdf, proxies)
+                                            if not text:
+                                                bse_pdf = f"https://www.bseindia.com/xml-data/corpfiling/AttachHis/{att}"
+                                                text, error = extract_text_from_pdf(bse_pdf, proxies)
+                                            if text:
+                                                print(f"  BSE search fallback succeeded!")
+                                                url = bse_pdf
+                                                break
+                    except Exception as fb_err:
+                        print(f"  BSE search fallback error: {fb_err}")
+
             results.append({
                 'url': url,
                 'title': title,

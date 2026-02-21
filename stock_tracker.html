@@ -2079,6 +2079,8 @@
                     if (doc && !doc.title.toUpperCase().includes('REC')) {
                         docsToFetch.push({
                             url: doc.url,
+                            bse_url: doc.bse_url || doc.attachment_url || '',
+                            symbol: ddSymbol.replace('.NS','').replace('.BO',''),
                             title: doc.quarter || doc.title,
                             type: 'concall'
                         });
@@ -2092,6 +2094,8 @@
                     if (doc) {
                         docsToFetch.push({
                             url: doc.url,
+                            bse_url: doc.bse_url || doc.attachment_url || '',
+                            symbol: ddSymbol.replace('.NS','').replace('.BO',''),
                             title: doc.title,
                             type: 'presentation'
                         });
