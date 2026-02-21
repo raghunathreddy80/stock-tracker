@@ -1722,8 +1722,25 @@
             checkBackend();
             startAutoUpdate();
 
-            // Load data from DB in background — render as each arrives
-            // (no premature empty render — rows appear with skeleton price cells)
+            // Instantly render from localStorage cache (if available)
+            const cachedWatchlist = localStorage.getItem(WATCHLIST_KEY);
+            const cachedPortfolio = localStorage.getItem(PORTFOLIO_KEY);
+            if (cachedWatchlist) {
+                try {
+                    watchlist = JSON.parse(cachedWatchlist);
+                    watchlistLoaded = true;
+                    renderWatchlist();
+                } catch(e) {}
+            }
+            if (cachedPortfolio) {
+                try {
+                    portfolio = JSON.parse(cachedPortfolio);
+                    portfolioLoaded = true;
+                    renderPortfolio();
+                } catch(e) {}
+            }
+
+            // Then fetch fresh data from DB in background and update
             loadFromStorage();
         }
 
@@ -1739,6 +1756,7 @@
                 if (wlResult.status === 'fulfilled' && wlResult.value.ok) {
                     watchlist = await wlResult.value.json();
                     watchlistLoaded = true;
+                    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(watchlist));
                     console.log('Loaded watchlist from database:', watchlist);
                     // Seed price cache so rows show last-known prices instantly
                     watchlist.forEach(s => {
@@ -1765,6 +1783,7 @@
                 if (pfResult.status === 'fulfilled' && pfResult.value.ok) {
                     portfolio = await pfResult.value.json();
                     portfolioLoaded = true;
+                    localStorage.setItem(PORTFOLIO_KEY, JSON.stringify(portfolio));
                     console.log('Loaded portfolio from database:', portfolio);
                     renderPortfolio();
                 }
