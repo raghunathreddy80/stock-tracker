@@ -1108,9 +1108,13 @@ def get_announcements():
 
         # ── BSE AnnGetData: most recent filings, per scrip code ───────────────
         if bse_code:
+            import datetime as _dt
+            _today = _dt.date.today()
+            _from  = (_today - _dt.timedelta(days=7)).strftime('%Y%m%d')
+            _to    = _today.strftime('%Y%m%d')
             r = safe_get(
                 f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
-                f"?strCat=-1&strPrevDate=&strScrip={bse_code}&strSearch=P&strToDate=&strType=C",
+                f"?strCat=-1&strPrevDate={_from}&strScrip={bse_code}&strSearch=P&strToDate={_to}&strType=C",
                 BSE_HDR, timeout=15)
             if r:
                 try:
@@ -1183,9 +1187,17 @@ def get_announcements():
                             d = r.json()
                             items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
                             if items:
-                                # Filter to last 48 hours only
-                                cutoff = datetime.datetime.now() - datetime.timedelta(hours=48)
+                                # Sort by date descending so most recent is first
+                                def nse_ts(i):
+                                    d = parse_date(i.get('an_dt') or i.get('date') or '')
+                                    return d.timestamp() if d else 0
+                                items.sort(key=nse_ts, reverse=True)
+
+                                # Try 48h filter first (IST offset: server is UTC, NSE dates are IST)
+                                # Add 5.5hr buffer to account for IST vs UTC
+                                cutoff = datetime.datetime.now() - datetime.timedelta(hours=48 + 6)
                                 items_48h = [i for i in items if (parse_date(i.get('an_dt') or i.get('date') or '') or datetime.datetime.min) >= cutoff]
+
                                 if items_48h:
                                     print(f"  NSE: {len(items_48h)} items (48h)")
                                     parsed = parse_items(items_48h, symbol, base, 'NSE')
@@ -1193,8 +1205,13 @@ def get_announcements():
                                     got = bool(parsed)
                                     break
                                 else:
-                                    # No items in 48h but API is working — try without date filter
-                                    print(f"  NSE: {len(items)} total items, none in 48h window")
+                                    # Still nothing — just take the 3 most recent regardless of date
+                                    recent = items[:3]
+                                    print(f"  NSE: {len(items)} total items, none in 48h window — taking {len(recent)} most recent")
+                                    parsed = parse_items(recent, symbol, base, 'NSE')
+                                    all_ann.extend(parsed)
+                                    got = bool(parsed)
+                                    break
                         except Exception as e:
                             print(f"  NSE parse error: {e}")
 
