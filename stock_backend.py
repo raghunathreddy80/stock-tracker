@@ -30,12 +30,30 @@ import requests as req
 
 
 # ── BSE code lookup: package + HTTP fallback ──────────────────────────────────
+# Hardcoded BSE codes for symbols that APIs commonly fail to resolve
+_BSE_CODE_CACHE = {
+    'TCI':        '532349',
+    'HIKAL':      '524735',
+    'IEX':        '540768',
+    'SOLARA':     '541540',
+    'ENTERO':     '544010',
+    'NEULANDLAB': '524558',
+    'LAURUSLABS': '540222',
+    'CANBK':      '532483',
+    'TCIEXP':     '540212',
+}
+
 def resolve_bse_code(base_symbol, proxies=None):
     """
     Resolve BSE numeric scrip code for an NSE symbol.
-    Tries: bse package → fetchComp API → Search API → Msource API
+    Tries: hardcoded cache → bse package → fetchComp API → Search API → Msource API → getquote
     Returns string like '532540' or '' if not found.
     """
+    # Method 0: hardcoded cache (instant, no API call)
+    if base_symbol in _BSE_CODE_CACHE:
+        code = _BSE_CODE_CACHE[base_symbol]
+        print(f"  BSE code (cache): {code}")
+        return code
     BSE_HDR = {
         'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept':          'application/json, text/plain, */*',
@@ -61,6 +79,15 @@ def resolve_bse_code(base_symbol, proxies=None):
     except Exception as e:
         print(f"  BSE pkg: {e}")
 
+    def safe_json(r):
+        """Parse JSON only if response has valid content."""
+        if not r or not r.text or not r.text.strip() or r.text.strip() in ('null', '[]', '{}'):
+            return None
+        try:
+            return r.json()
+        except Exception:
+            return None
+
     # Method 2: fetchComp HTTP API
     try:
         r = req.get(
@@ -68,13 +95,15 @@ def resolve_bse_code(base_symbol, proxies=None):
             f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
             f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base_symbol}",
             headers=BSE_HDR, timeout=10, proxies=proxies)
-        if r.ok:
-            for item in r.json().get('Table', []):
+        data = safe_json(r) if r.ok else None
+        if data:
+            for item in data.get('Table', []):
                 sym = (item.get('nsesymbol') or item.get('NSESymbol', '')).upper()
                 if sym == base_symbol:
                     code = str(item.get('scripcode') or item.get('Scripcode', ''))
                     if code:
                         print(f"  BSE code (fetchComp): {code}")
+                        _BSE_CODE_CACHE[base_symbol] = code
                         return code
     except Exception as e:
         print(f"  BSE fetchComp: {e}")
@@ -84,15 +113,16 @@ def resolve_bse_code(base_symbol, proxies=None):
         r = req.get(
             f"https://api.bseindia.com/BseIndiaAPI/api/Search/w?str={base_symbol}&type=D",
             headers=BSE_HDR, timeout=8, proxies=proxies)
-        if r.ok:
-            results = r.json()
-            items = results if isinstance(results, list) else results.get('Table', [])
+        data = safe_json(r) if r.ok else None
+        if data:
+            items = data if isinstance(data, list) else data.get('Table', [])
             for item in items:
                 sym = (item.get('NSESYMBOL') or item.get('nsesymbol', '')).upper()
                 if sym == base_symbol:
                     code = str(item.get('SCRIP_CD') or item.get('scripcode', ''))
                     if code:
                         print(f"  BSE code (Search): {code}")
+                        _BSE_CODE_CACHE[base_symbol] = code
                         return code
     except Exception as e:
         print(f"  BSE Search: {e}")
@@ -102,15 +132,65 @@ def resolve_bse_code(base_symbol, proxies=None):
         r = req.get(
             f"https://api.bseindia.com/Msource/1D/getQouteSearch.aspx?Type=EQ&text={base_symbol}&flag=site",
             headers=BSE_HDR, timeout=8, proxies=proxies)
-        if r.ok:
-            hits = r.json()
-            if isinstance(hits, list) and hits:
-                code = str(hits[0].get('scripcode', ''))
-                if code:
-                    print(f"  BSE code (Msource): {code}")
-                    return code
+        data = safe_json(r) if r.ok else None
+        if data and isinstance(data, list) and data:
+            code = str(data[0].get('scripcode', ''))
+            if code:
+                print(f"  BSE code (Msource): {code}")
+                _BSE_CODE_CACHE[base_symbol] = code
+                return code
     except Exception as e:
         print(f"  BSE Msource: {e}")
+
+    # Method 5: BSE getquote API (uses NSE symbol directly)
+    try:
+        r = req.get(
+            f"https://api.bseindia.com/BseIndiaAPI/api/getScripHeaderData/w?Scrip={base_symbol}&isEQ=true",
+            headers=BSE_HDR, timeout=8, proxies=proxies)
+        if r.ok and r.text.strip():
+            data = r.json()
+            code = str(data.get('scripCd') or data.get('ScripCode') or data.get('scripcode') or '')
+            if code and code != '0':
+                print(f"  BSE code (getScripHeader): {code}")
+                _BSE_CODE_CACHE[base_symbol] = code  # cache for future
+                return code
+    except Exception as e:
+        print(f"  BSE getScripHeader: {e}")
+
+    # Method 6: NSE company info API — NSE gives us BSE code directly
+    try:
+        nse_sess = req.Session()
+        nse_sess.get('https://www.nseindia.com', headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,*/*',
+        }, timeout=10, proxies=proxies)
+        r = nse_sess.get(
+            f"https://www.nseindia.com/api/quote-equity?symbol={base_symbol}",
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+                'Referer': 'https://www.nseindia.com/',
+            }, timeout=10, proxies=proxies)
+        if r.ok and r.text.strip():
+            data = r.json()
+            code = str(data.get('metadata', {}).get('pdSectorPe') or
+                      data.get('info', {}).get('isin') or '')
+            # Try to get BSE code from ISIN via BSE
+            isin = data.get('metadata', {}).get('isin') or data.get('info', {}).get('isin') or ''
+            if isin:
+                r2 = req.get(
+                    f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w?isin={isin}",
+                    headers=BSE_HDR, timeout=8, proxies=proxies)
+                if r2.ok and r2.text.strip():
+                    items = r2.json().get('Table', [])
+                    if items:
+                        code = str(items[0].get('scripcode') or items[0].get('Scripcode', ''))
+                        if code:
+                            print(f"  BSE code (NSE ISIN): {code}")
+                            _BSE_CODE_CACHE[base_symbol] = code
+                            return code
+    except Exception as e:
+        print(f"  BSE via NSE ISIN: {e}")
 
     print(f"  !! Could not resolve BSE code for {base_symbol}")
     return ''
@@ -953,17 +1033,26 @@ def get_announcements():
     # ── Step 1: resolve BSE scrip codes for all symbols ───────────────────────
     bse_codes = {}   # base → numeric BSE scrip code string
 
-    # Try bse pip package first (most reliable)
+    # Seed from hardcoded cache first (instant, no API)
+    for sym in symbols:
+        base = sym.replace('.NS','').replace('.BO','')
+        if base in _BSE_CODE_CACHE:
+            bse_codes[base] = _BSE_CODE_CACHE[base]
+
+    # Try bse pip package for any still missing
     try:
         from bse import BSE as BsePkg
         import tempfile
         with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
             for sym in symbols:
                 base = sym.replace('.NS','').replace('.BO','')
+                if base in bse_codes:
+                    continue
                 try:
                     r = bpkg.lookup(base)
                     if r and r.get('bse_code'):
                         bse_codes[base] = str(r['bse_code'])
+                        _BSE_CODE_CACHE[base] = str(r['bse_code'])
                 except Exception:
                     pass
         print(f"  BSE pkg codes: {bse_codes}")
@@ -988,22 +1077,25 @@ def get_announcements():
                         code = str(item.get('scripcode') or item.get('Scripcode') or '')
                         if code:
                             bse_codes[base] = code
+                            _BSE_CODE_CACHE[base] = code
                             print(f"  fetchComp: {base} → {code}")
                         break
             except Exception:
                 pass
 
+    # Use resolve_bse_code for anything still missing (tries all methods)
+    for sym in symbols:
+        base = sym.replace('.NS','').replace('.BO','')
+        if base not in bse_codes:
+            code = resolve_bse_code(base, proxies)
+            if code:
+                bse_codes[base] = code
+
     print(f"  Resolved codes: {bse_codes}")
 
-    # ── Step 2: NSE session (built once for fallback) ─────────────────────────
-    nse_sess = req.Session()
-    try:
-        nse_sess.get('https://www.nseindia.com',
-                     headers={**NSE_HDR, 'Accept': 'text/html,application/xhtml+xml,*/*'},
-                     timeout=12, proxies=proxies)
-        print(f"  NSE cookies: {list(nse_sess.cookies.keys())}")
-    except Exception as e:
-        print(f"  NSE session: {e}")
+    # ── Step 2: NSE session (shared, auto-refreshed) ─────────────────────────
+    nse_sess = get_nse_session(proxies=proxies)
+    print(f"  NSE cookies: {list(nse_sess.cookies.keys())}")
 
     # ── Step 3: fetch per symbol ──────────────────────────────────────────────
     all_ann = []
@@ -1081,21 +1173,30 @@ def get_announcements():
             ]:
                 r = safe_get(url, NSE_HDR, sess=nse_sess, timeout=12)
                 if r:
-                    try:
-                        d = r.json()
-                        items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
-                        if items:
-                            # Filter to last 48 hours only
-                            cutoff = datetime.datetime.now() - datetime.timedelta(hours=48)
-                            items_24h = [i for i in items if (parse_date(i.get('an_dt') or i.get('date') or '') or datetime.datetime.min) >= cutoff]
-                            if items_24h:
-                                print(f"  NSE: {len(items_24h)} items (24h)")
-                                parsed = parse_items(items_24h, symbol, base, 'NSE')
-                                all_ann.extend(parsed)
-                                got = bool(parsed)
-                                break
-                    except Exception as e:
-                        print(f"  NSE parse error: {e}")
+                    # If empty body, NSE session cookie expired — refresh and retry
+                    if not r.text.strip():
+                        print(f"  NSE empty response — refreshing session and retrying")
+                        nse_sess = get_nse_session(proxies=proxies, force_refresh=True)
+                        r = safe_get(url, NSE_HDR, sess=nse_sess, timeout=12)
+                    if r:
+                        try:
+                            d = r.json()
+                            items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
+                            if items:
+                                # Filter to last 48 hours only
+                                cutoff = datetime.datetime.now() - datetime.timedelta(hours=48)
+                                items_48h = [i for i in items if (parse_date(i.get('an_dt') or i.get('date') or '') or datetime.datetime.min) >= cutoff]
+                                if items_48h:
+                                    print(f"  NSE: {len(items_48h)} items (48h)")
+                                    parsed = parse_items(items_48h, symbol, base, 'NSE')
+                                    all_ann.extend(parsed)
+                                    got = bool(parsed)
+                                    break
+                                else:
+                                    # No items in 48h but API is working — try without date filter
+                                    print(f"  NSE: {len(items)} total items, none in 48h window")
+                        except Exception as e:
+                            print(f"  NSE parse error: {e}")
 
         if not got:
             print(f"  !! No announcements found for {base}")
