@@ -1034,10 +1034,10 @@ def get_announcements():
                 except Exception as e:
                     print(f"  BSE AnnGetData parse error: {e}")
 
-        # ── BSE AnnSubCategoryGetData: last 24 hours ─
+        # ── BSE AnnSubCategoryGetData: last 48 hours ─
         if not got and bse_code:
             today    = datetime.date.today()
-            days_ago = today - datetime.timedelta(days=1)
+            days_ago = today - datetime.timedelta(days=2)
             from_dt  = days_ago.strftime('%d%%2F%m%%2F%Y')
             to_dt    = today.strftime('%d%%2F%m%%2F%Y')
             r = safe_get(
@@ -1085,8 +1085,8 @@ def get_announcements():
                         d = r.json()
                         items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
                         if items:
-                            # Filter to last 24 hours only
-                            cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
+                            # Filter to last 48 hours only
+                            cutoff = datetime.datetime.now() - datetime.timedelta(hours=48)
                             items_24h = [i for i in items if (parse_date(i.get('an_dt') or i.get('date') or '') or datetime.datetime.min) >= cutoff]
                             if items_24h:
                                 print(f"  NSE: {len(items_24h)} items (24h)")
