@@ -885,6 +885,21 @@
             border-color: var(--accent-primary);
         }
         
+        /* Price skeleton shimmer while loading */
+        @keyframes shimmer {
+            0% { background-position: -200px 0; }
+            100% { background-position: 200px 0; }
+        }
+        .price-skeleton {
+            display: inline-block;
+            width: 70px;
+            height: 14px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-color) 50%, var(--bg-tertiary) 75%);
+            background-size: 400px 100%;
+            animation: shimmer 1.2s infinite;
+        }
+
         /* Price flash animations for live updates */
         @keyframes flashUp {
             0%   { background: rgba(16, 185, 129, 0.3); }
@@ -1618,10 +1633,25 @@
             checkBackend();
             
             await loadFromStorage(); // Wait for data to load from database
+
+            // Seed priceCache from DB-stored prices so table renders with real values instantly
+            [...watchlist, ...portfolio].forEach(s => {
+                if (s.symbol && (s.current_price || s.price) > 0) {
+                    priceCache[s.symbol] = {
+                        price: s.current_price || s.price || 0,
+                        change: s.change || 0,
+                        changePercent: s.changePercent || 0,
+                        volume: s.volume || 0
+                    };
+                }
+            });
+
             renderWatchlist();
             renderPortfolio();
-            updatePrices();
             startAutoUpdate();
+
+            // Kick off live price poll immediately (no delay)
+            pollPrices();
         }
 
         async function loadFromStorage() {
@@ -2740,17 +2770,24 @@
                 const changeClass = stock.change >= 0 ? 'change-positive' : 'change-negative';
                 const changeSign = stock.change >= 0 ? '+' : '';
                 const pctSign = stock.changePercent >= 0 ? '+' : '';
+                const noPrice = !stock.price || stock.price === 0;
+                const priceCell = noPrice
+                    ? `<span class="price-skeleton"></span>`
+                    : `₹${stock.price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                const changeCell = noPrice
+                    ? `<span class="price-skeleton"></span>`
+                    : `<div>${changeSign}${stock.change.toFixed(2)}</div><div style="font-size:0.8em;opacity:0.85;">(${pctSign}${stock.changePercent.toFixed(2)}%)</div>`;
+                const volumeCell = noPrice
+                    ? `<span class="price-skeleton"></span>`
+                    : stock.volume.toLocaleString('en-IN');
                 return `
                 <tr data-symbol="${stock.symbol}" data-table="watchlist">
                     <td>
                         <div class="company-name">${stock.name}</div>
                     </td>
-                    <td class="price">₹${stock.price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
-                    <td class="${changeClass}">
-                        <div>${changeSign}${stock.change.toFixed(2)}</div>
-                        <div style="font-size:0.8em;opacity:0.85;">(${pctSign}${stock.changePercent.toFixed(2)}%)</div>
-                    </td>
-                    <td>${stock.volume.toLocaleString('en-IN')}</td>
+                    <td class="price">${priceCell}</td>
+                    <td class="${noPrice ? '' : changeClass}">${changeCell}</td>
+                    <td>${volumeCell}</td>
                     <td>
                         <button
                             onclick="removeFromWatchlist('${stock.symbol}')"
