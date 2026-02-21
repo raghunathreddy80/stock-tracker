@@ -3479,6 +3479,44 @@
         let announcementInterval = null;
         let knownAnnouncementIds = new Set();
         let announcementsInitialized = false;
+        const ANN_CACHE_KEY = 'stockTracker_announcements';
+
+        const DATE_MONTHS = {
+            'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
+            'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12
+        };
+        function parseAnnDate(s) {
+            if (!s) return 0;
+            s = s.trim();
+            const m = s.match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+            if (m) {
+                const mon = DATE_MONTHS[m[2].toLowerCase()];
+                if (mon) return new Date(
+                    parseInt(m[3]), mon-1, parseInt(m[1]),
+                    parseInt(m[4]||0), parseInt(m[5]||0), parseInt(m[6]||0)
+                ).getTime();
+            }
+            const d = new Date(s);
+            return isNaN(d.getTime()) ? 0 : d.getTime();
+        }
+
+        function saveAnnouncementsCache(announcements) {
+            try {
+                localStorage.setItem(ANN_CACHE_KEY, JSON.stringify({
+                    ts: Date.now(),
+                    data: announcements
+                }));
+            } catch(e) {}
+        }
+
+        function loadAnnouncementsCache() {
+            try {
+                const raw = localStorage.getItem(ANN_CACHE_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                return parsed.data || null;
+            } catch(e) { return null; }
+        }
 
         function startAutoUpdate() {
             // Fast price polling every 5 seconds (AJAX-style, in-place updates)
@@ -3521,12 +3559,30 @@
                 return;
             }
 
-            // Only show loading spinner on first load
-            if (!announcementsInitialized) {
+            // ── Step 1: show cached announcements instantly ───────────────
+            const cached = loadAnnouncementsCache();
+            if (cached && cached.length > 0 && !announcementsInitialized) {
+                renderAnnouncementList(cached, []);
+                announcementsInitialized = true;
+                // Populate known IDs from cache so we can detect truly new ones
+                cached.forEach(ann => {
+                    knownAnnouncementIds.add(`${ann.symbol}|${ann.date}|${ann.title}`);
+                });
+                // Show a subtle "refreshing" indicator
+                const refreshBar = document.createElement('div');
+                refreshBar.id = 'annRefreshBar';
+                refreshBar.style.cssText = `
+                    text-align:center;padding:0.5rem;font-size:0.8rem;
+                    color:var(--text-secondary);margin-bottom:0.5rem;
+                    display:flex;align-items:center;justify-content:center;gap:0.5rem;`;
+                refreshBar.innerHTML = `<div class="loading" style="width:14px;height:14px;border-width:2px;"></div> Checking for new announcements...`;
+                container.insertBefore(refreshBar, container.firstChild);
+            } else if (!announcementsInitialized) {
+                // No cache — show loading spinner
                 container.innerHTML = `
                     <div class="empty-state">
                         <div class="loading"></div>
-                        <p style="margin-top:1rem;">Fetching corporate announcements from NSE...</p>
+                        <p style="margin-top:1rem;">Fetching corporate announcements...</p>
                     </div>
                 `;
             }
@@ -3545,39 +3601,26 @@
 
                 let announcements = (await response.json()).announcements || [];
 
-                // Sort newest first on frontend too
-                const DATE_MONTHS = {
-                    'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
-                    'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12
-                };
-                function parseAnnDate(s) {
-                    if (!s) return 0;
-                    s = s.trim();
-                    const m = s.match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
-                    if (m) {
-                        const mon = DATE_MONTHS[m[2].toLowerCase()];
-                        if (mon) return new Date(
-                            parseInt(m[3]), mon-1, parseInt(m[1]),
-                            parseInt(m[4]||0), parseInt(m[5]||0), parseInt(m[6]||0)
-                        ).getTime();
-                    }
-                    const d = new Date(s);
-                    return isNaN(d.getTime()) ? 0 : d.getTime();
-                }
                 announcements.sort((a, b) => parseAnnDate(b.date) - parseAnnDate(a.date));
 
                 // ── detect new announcements ──────────────────────────────
                 const newOnes = [];
                 announcements.forEach(ann => {
-                    // unique ID = symbol + date + title
                     const id = `${ann.symbol}|${ann.date}|${ann.title}`;
                     if (!knownAnnouncementIds.has(id)) {
                         knownAnnouncementIds.add(id);
-                        if (announcementsInitialized) newOnes.push(ann); // only alert after first load
+                        if (announcementsInitialized) newOnes.push(ann);
                     }
                 });
 
                 announcementsInitialized = true;
+
+                // Save to cache for next visit
+                saveAnnouncementsCache(announcements);
+
+                // Remove refresh bar if present
+                const bar = document.getElementById('annRefreshBar');
+                if (bar) bar.remove();
 
                 // ── alert for new announcements ───────────────────────────
                 if (alertOnNew && newOnes.length > 0) {
@@ -3595,46 +3638,13 @@
                     return;
                 }
 
-                container.innerHTML = announcements.map(ann => {
-                    const ms = parseAnnDate(ann.date);
-                    let dateStr = ann.date || '';
-                    if (ms > 0) {
-                        const d = new Date(ms);
-                        dateStr = d.toLocaleDateString('en-IN', { year:'numeric', month:'short', day:'numeric' });
-                        const timePart = ann.date.match(/(\d{2}:\d{2})/);
-                        if (timePart) dateStr += ' ' + timePart[1];
-                    }
-                    const id = `${ann.symbol}|${ann.date}|${ann.title}`;
-                    const isNew = newOnes.some(n => `${n.symbol}|${n.date}|${n.title}` === id);
-
-                    return `
-                        <div class="announcement-item" ${isNew ? 'style="border-color: var(--accent-primary); background: rgba(0,212,255,0.05);"' : ''}>
-                            <div class="announcement-header">
-                                <div style="display:flex; align-items:center; gap:0.6rem;">
-                                    ${isNew ? '<span style="background:var(--accent-primary);color:#000;font-size:0.7rem;font-weight:700;padding:0.2rem 0.5rem;border-radius:4px;">NEW</span>' : ''}
-                                    <div>
-                                        <div class="announcement-company">${ann.company}</div>
-                                        <div class="stock-symbol">${ann.symbol.replace('.NS','').replace('.BO','')} • ${ann.exchange}</div>
-                                    </div>
-                                </div>
-                                <div class="announcement-date">${dateStr}</div>
-                            </div>
-                            <div class="announcement-title">${ann.title}</div>
-                            ${ann.category ? `<div style="margin-top:0.5rem;">
-                                <span style="background:var(--bg-tertiary);color:var(--text-secondary);padding:0.2rem 0.6rem;border-radius:4px;font-size:0.8rem;">${ann.category}</span>
-                            </div>` : ''}
-                            ${ann.attachment_url ? `<div style="margin-top:0.5rem;">
-                                <a href="${ann.attachment_url}" target="_blank" rel="noopener noreferrer"
-                                   style="color:var(--accent-primary);font-size:0.85rem;text-decoration:none;">
-                                   📎 View Document
-                                </a>
-                            </div>` : ''}
-                        </div>
-                    `;
-                }).join('');
+                renderAnnouncementList(announcements, newOnes);
 
             } catch (error) {
                 console.error('Announcements error:', error);
+                // Remove refresh bar on error too
+                const bar = document.getElementById('annRefreshBar');
+                if (bar) bar.remove();
                 if (!announcementsInitialized) {
                     container.innerHTML = `
                         <div class="empty-state">
@@ -3643,7 +3653,49 @@
                         </div>
                     `;
                 }
+                // If we had cached data, keep showing it — don't wipe it
             }
+        }
+
+        function renderAnnouncementList(announcements, newOnes) {
+            const container = document.getElementById('announcementsList');
+            container.innerHTML = announcements.map(ann => {
+                const ms = parseAnnDate(ann.date);
+                let dateStr = ann.date || '';
+                if (ms > 0) {
+                    const d = new Date(ms);
+                    dateStr = d.toLocaleDateString('en-IN', { year:'numeric', month:'short', day:'numeric' });
+                    const timePart = ann.date.match(/(\d{2}:\d{2})/);
+                    if (timePart) dateStr += ' ' + timePart[1];
+                }
+                const id = `${ann.symbol}|${ann.date}|${ann.title}`;
+                const isNew = newOnes.some(n => `${n.symbol}|${n.date}|${n.title}` === id);
+
+                return `
+                    <div class="announcement-item" ${isNew ? 'style="border-color: var(--accent-primary); background: rgba(0,212,255,0.05);"' : ''}>
+                        <div class="announcement-header">
+                            <div style="display:flex; align-items:center; gap:0.6rem;">
+                                ${isNew ? '<span style="background:var(--accent-primary);color:#000;font-size:0.7rem;font-weight:700;padding:0.2rem 0.5rem;border-radius:4px;">NEW</span>' : ''}
+                                <div>
+                                    <div class="announcement-company">${ann.company}</div>
+                                    <div class="stock-symbol">${ann.symbol.replace('.NS','').replace('.BO','')} • ${ann.exchange}</div>
+                                </div>
+                            </div>
+                            <div class="announcement-date">${dateStr}</div>
+                        </div>
+                        <div class="announcement-title">${ann.title}</div>
+                        ${ann.category ? `<div style="margin-top:0.5rem;">
+                            <span style="background:var(--bg-tertiary);color:var(--text-secondary);padding:0.2rem 0.6rem;border-radius:4px;font-size:0.8rem;">${ann.category}</span>
+                        </div>` : ''}
+                        ${ann.attachment_url ? `<div style="margin-top:0.5rem;">
+                            <a href="${ann.attachment_url}" target="_blank" rel="noopener noreferrer"
+                               style="color:var(--accent-primary);font-size:0.85rem;text-decoration:none;">
+                               📎 View Document
+                            </a>
+                        </div>` : ''}
+                    </div>
+                `;
+            }).join('');
         }
 
         function showNewAnnouncementAlert(newOnes) {
