@@ -583,15 +583,25 @@ def health():
 def admin_get_users():
     """
     Admin endpoint: list all registered users with watchlist/portfolio counts.
-    Only accessible when logged in.
     """
     try:
         conn = get_db_connection()
         c = conn.cursor()
 
+        print(f"  [admin/users] USE_POSTGRES={USE_POSTGRES}")
+
+        # Simple count first to verify DB connection
+        if USE_POSTGRES:
+            c.execute('SELECT COUNT(*) AS cnt FROM users')
+        else:
+            c.execute('SELECT COUNT(*) AS cnt FROM users')
+        count_row = c.fetchone()
+        print(f"  [admin/users] total users in DB: {dict(count_row)}")
+
         if USE_POSTGRES:
             c.execute('''
-                SELECT u.id, u.username, u.email, u.created_at, u.last_login,
+                SELECT u.id, u.username, u.email,
+                       u.created_at, u.last_login,
                        COUNT(DISTINCT w.id) AS watchlist_count,
                        COUNT(DISTINCT p.id) AS portfolio_count
                 FROM users u
@@ -602,7 +612,8 @@ def admin_get_users():
             ''')
         else:
             c.execute('''
-                SELECT u.id, u.username, u.email, u.created_at, u.last_login,
+                SELECT u.id, u.username, u.email,
+                       u.created_at, u.last_login,
                        COUNT(DISTINCT w.id) AS watchlist_count,
                        COUNT(DISTINCT p.id) AS portfolio_count
                 FROM users u
@@ -614,6 +625,7 @@ def admin_get_users():
 
         rows = c.fetchall()
         conn.close()
+        print(f"  [admin/users] rows returned: {len(rows)}")
 
         users = []
         for row in rows:
@@ -628,10 +640,11 @@ def admin_get_users():
                 'portfolio_count': row.get('portfolio_count', 0),
             })
 
-        return jsonify({'users': users, 'total': len(users)})
+        return jsonify(users)
 
     except Exception as e:
         print(f"Admin users error: {e}")
+        import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
