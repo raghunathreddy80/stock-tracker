@@ -1412,6 +1412,10 @@
                 <span class="nav-icon">🔬</span>
                 <span class="nav-label">Deep Dive</span>
             </button>
+            <button class="mobile-nav-item" id="adminMobileNavItem" onclick="switchTabMobile(4)" style="display:none;">
+                <span class="nav-icon">👥</span>
+                <span class="nav-label">Users</span>
+            </button>
         </div>
 
         <!-- User info + logout at bottom of nav -->
@@ -1448,6 +1452,7 @@
             <button class="tab" onclick="switchTab(1)">💼 Portfolio</button>
             <button class="tab" onclick="switchTab(2)">📢 Announcements</button>
             <button class="tab" onclick="switchTab(3)">🔬 Deep Dive</button>
+            <button class="tab" id="adminTab" onclick="switchTab(4)" style="display:none;">👥 Users</button>
         </div>
 
         <div class="tab-content active" id="watchlist">
@@ -1605,6 +1610,41 @@
                 </div>
             </div>
         </div>
+
+        <!-- Admin: Users Tab (only visible to raghunathreddy80) -->
+        <div class="tab-content" id="adminUsers" style="display:none;">
+            <div class="search-section" style="margin-bottom:1.5rem;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
+                    <div>
+                        <div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);">👥 Registered Users</div>
+                        <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:0.2rem;">Manage all registered accounts</div>
+                    </div>
+                    <button class="btn" onclick="loadAdminUsers()" style="padding:0.7rem 1.5rem;font-size:0.9rem;">🔄 Refresh</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Username</th>
+                            <th>Registered</th>
+                            <th>Watchlist</th>
+                            <th>Portfolio</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="adminUsersTable">
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <div class="empty-state-icon">👥</div>
+                                <p>Loading users...</p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <div class="update-indicator" id="updateIndicator" style="display: none;">
@@ -1696,20 +1736,40 @@
             tabs.forEach((tab, i) => {
                 if (i === index) {
                     tab.classList.add('active');
-                    contents[i].classList.add('active');
                 } else {
                     tab.classList.remove('active');
-                    contents[i].classList.remove('active');
                 }
             });
-            
+
+            // Handle regular tabs (0-3)
+            contents.forEach((content, i) => {
+                if (i === index) {
+                    content.classList.add('active');
+                } else {
+                    content.classList.remove('active');
+                }
+            });
+
+            // Handle admin tab (index 4) separately — it's outside .tab-content list
+            const adminPanel = document.getElementById('adminUsers');
+            if (adminPanel) {
+                if (index === 4) {
+                    // Hide all regular tab contents
+                    contents.forEach(c => c.classList.remove('active'));
+                    adminPanel.style.display = 'block';
+                    loadAdminUsers();
+                } else {
+                    adminPanel.style.display = 'none';
+                }
+            }
+
             if (index === 1) updatePortfolioChart();
             if (index === 2) updateAnnouncements();
             if (index === 3) initDeepDive();
         }
 
         // ── Mobile Nav ───────────────────────────────────────────────
-        const TAB_LABELS = ['📊 Watchlist', '💼 Portfolio', '📢 Announcements', '🔬 Deep Dive'];
+        const TAB_LABELS = ['📊 Watchlist', '💼 Portfolio', '📢 Announcements', '🔬 Deep Dive', '👥 Users'];
 
         function toggleMobileNav() {
             const nav = document.getElementById('mobileNav');
@@ -2410,13 +2470,20 @@
                 return;
             }
             
-            // Add username and logout button
             // Always populate mobile nav footer (CSS hides it on desktop via media query)
             const footer = document.getElementById('mobileNavFooter');
             const userEl = document.getElementById('mobileNavUser');
             if (footer && userEl) {
                 userEl.innerHTML = `<span style="font-size:1.1rem;">👤</span> ${data.username}`;
                 footer.classList.add('populated');
+            }
+
+            // Show admin tab only for raghunathreddy80
+            if (data.username === 'raghunathreddy80') {
+                const adminTab = document.getElementById('adminTab');
+                if (adminTab) adminTab.style.display = '';
+                const adminMobileItem = document.getElementById('adminMobileNavItem');
+                if (adminMobileItem) adminMobileItem.style.display = '';
             }
 
             const isMobile = window.innerWidth <= 768;
@@ -2447,6 +2514,82 @@
         }
         window.location.href = '/login.html';
     }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ADMIN — USER MANAGEMENT
+        // ══════════════════════════════════════════════════════════════════════
+
+        async function loadAdminUsers() {
+            const tbody = document.getElementById('adminUsersTable');
+            tbody.innerHTML = `
+                <tr><td colspan="6" class="empty-state">
+                    <div class="loading" style="margin:0 auto 1rem;"></div>
+                    <p>Loading users...</p>
+                </td></tr>`;
+            try {
+                const resp = await fetch(API_URL + '/admin/users', { credentials: 'include' });
+                if (!resp.ok) throw new Error('Not authorised or server error');
+                const users = await resp.json();
+                if (!users.length) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
+                        <div class="empty-state-icon">👥</div><p>No users found.</p>
+                    </td></tr>`;
+                    return;
+                }
+                tbody.innerHTML = users.map((u, i) => `
+                    <tr>
+                        <td style="color:var(--text-secondary);font-size:0.85rem;">${i + 1}</td>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:0.6rem;">
+                                <span style="font-size:1.1rem;">👤</span>
+                                <div>
+                                    <div class="company-name">${u.username}</div>
+                                    ${u.username === 'raghunathreddy80' ? '<div style="font-size:0.75rem;color:var(--accent-primary);font-weight:600;">Admin</div>' : ''}
+                                </div>
+                            </div>
+                        </td>
+                        <td style="color:var(--text-secondary);font-size:0.85rem;">${u.created_at ? new Date(u.created_at).toLocaleDateString('en-IN', {year:'numeric',month:'short',day:'numeric'}) : '—'}</td>
+                        <td style="color:var(--text-secondary);">${u.watchlist_count ?? '—'}</td>
+                        <td style="color:var(--text-secondary);">${u.portfolio_count ?? '—'}</td>
+                        <td>
+                            ${u.username === 'raghunathreddy80'
+                                ? '<span style="color:var(--text-secondary);font-size:0.8rem;">Protected</span>'
+                                : `<button
+                                    onclick="removeUser('${u.username}')"
+                                    title="Remove user"
+                                    style="background:none;border:1px solid rgba(239,68,68,0.4);border-radius:6px;color:#ef4444;cursor:pointer;padding:0.35rem 0.5rem;font-size:1.1rem;line-height:1;transition:background 0.2s,border-color 0.2s;"
+                                    onmouseenter="this.style.background='rgba(239,68,68,0.15)';this.style.borderColor='#ef4444';"
+                                    onmouseleave="this.style.background='none';this.style.borderColor='rgba(239,68,68,0.4)';">🗑️</button>`
+                            }
+                        </td>
+                    </tr>`).join('');
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <p>Failed to load users: ${err.message}</p>
+                </td></tr>`;
+            }
+        }
+
+        async function removeUser(username) {
+            if (!confirm(`Remove user "${username}"? This will delete all their data permanently.`)) return;
+            try {
+                const resp = await fetch(API_URL + '/admin/users/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username })
+                });
+                const result = await resp.json();
+                if (result.success) {
+                    loadAdminUsers();
+                } else {
+                    alert(result.message || 'Failed to remove user');
+                }
+            } catch (err) {
+                alert('Error removing user: ' + err.message);
+            }
+        }
 
         // Check if backend is running
         async function checkBackend() {
