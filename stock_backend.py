@@ -19,7 +19,8 @@ for pkg, imp in [('flask','flask'),('flask-cors','flask_cors'),
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from auth import (init_db, create_user, verify_user, get_user_by_id, 
+from auth import (init_db, create_user, verify_user, get_user_by_id,
+                  get_db_connection, USE_POSTGRES,
                   update_last_login, get_user_watchlist, add_to_watchlist, 
                   remove_from_watchlist, reorder_watchlist, get_user_portfolio,
                   add_to_portfolio, update_portfolio_holding, remove_from_portfolio)
@@ -579,7 +580,6 @@ def health():
 
 
 @app.route('/api/admin/users', methods=['GET'])
-@login_required
 def admin_get_users():
     """
     Admin endpoint: list all registered users with watchlist/portfolio counts.
