@@ -1834,7 +1834,7 @@
 
             if (index === 1) updatePortfolioChart();
             if (index === 2 && !announcementsInitialized) updateAnnouncements();
-            if (index === 3) initDeepDive();
+            if (index === 3) switchTabDeepDive();
         }
 
         // ── Mobile Nav ───────────────────────────────────────────────
@@ -1877,11 +1877,22 @@
         let ddChatHistory = [];
         let ddDocuments = { annual: [], concalls: [], presentations: [] };
         let ddInitialized = false;
+        let ddSessionActive = false;   // true once documents have been read — locks controls + preserves state
 
         function initDeepDive() {
             if (ddInitialized) return;
             ddInitialized = true;
             populateDDStockSelect();
+        }
+
+        function switchTabDeepDive() {
+            // Called when switching TO deep dive tab
+            // If a session is active, just restore the locked state — don't reset anything
+            if (ddSessionActive) {
+                setDDControlsLocked(true);
+                return;
+            }
+            initDeepDive();
         }
 
         function populateDDStockSelect() {
@@ -1912,10 +1923,12 @@
             document.getElementById('ddSendBtn').disabled = true;
             document.getElementById('ddQuestion').placeholder = 'Select documents to read first...';
             
-            // Clear chat completely
+            // Clear chat completely and reset session lock
             ddContext = '';
             ddChatHistory = [];
             ddDocuments = { annual: [], concalls: [], presentations: [] };
+            ddSessionActive = false;
+            setDDProgress(0, 0);
             
             // Clear visible chat messages
             const chatContainer = document.getElementById('ddMessages');
@@ -2038,16 +2051,59 @@
         function setDDControlsLocked(locked) {
             // Lock/unlock the company dropdown
             const sel = document.getElementById('ddStockSelect');
-            if (sel) sel.disabled = locked;
+            if (sel) {
+                sel.disabled = locked;
+                sel.style.opacity = locked ? '0.5' : '1';
+                sel.style.cursor  = locked ? 'not-allowed' : '';
+            }
 
             // Lock/unlock every document checkbox (individual + select-all headers)
             document.querySelectorAll(
                 '.annual-checkbox, .concall-checkbox, .presentation-checkbox, #selectAllAnnual, #selectAllConcall, #selectAllPresentation'
-            ).forEach(cb => { cb.disabled = locked; });
+            ).forEach(cb => {
+                cb.disabled = locked;
+                cb.style.opacity = locked ? '0.4' : '1';
+                cb.style.cursor  = locked ? 'not-allowed' : '';
+            });
 
             // Lock/unlock the Read button itself so it can't be double-clicked
             const readBtn = document.getElementById('ddReadBtn');
             if (readBtn) readBtn.disabled = locked;
+
+            // Show/hide the "Change selection" button
+            let changeBtn = document.getElementById('ddChangeSelectionBtn');
+            if (locked) {
+                if (!changeBtn) {
+                    changeBtn = document.createElement('button');
+                    changeBtn.id = 'ddChangeSelectionBtn';
+                    changeBtn.className = 'btn';
+                    changeBtn.style.cssText = 'margin-top:0.5rem;width:100%;background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);font-size:0.85rem;padding:0.5rem;';
+                    changeBtn.textContent = '✏️ Change company or documents';
+                    changeBtn.onclick = () => setDDControlsLocked(false);
+                    const readBtnEl = document.getElementById('ddReadBtn');
+                    if (readBtnEl) readBtnEl.insertAdjacentElement('afterend', changeBtn);
+                }
+                changeBtn.style.display = 'block';
+            } else if (changeBtn) {
+                changeBtn.style.display = 'none';
+            }
+        }
+
+        function setDDProgress(current, total, label) {
+            const wrap = document.getElementById('ddProgressWrap');
+            const bar  = document.getElementById('ddProgressBar');
+            const pct  = document.getElementById('ddProgressPct');
+            const lbl  = document.getElementById('ddProgressLabel');
+            if (!wrap) return;
+            if (total === 0) {
+                wrap.style.display = 'none';
+                return;
+            }
+            wrap.style.display = 'block';
+            const p = Math.round((current / total) * 100);
+            bar.style.width  = p + '%';
+            pct.textContent  = p + '%';
+            lbl.textContent  = label || 'Reading documents...';
         }
 
         async function fetchDocumentText() {
@@ -2103,26 +2159,42 @@
                 });
                 
                 if (docsToFetch.length === 0) {
-                    document.getElementById('ddChatStatus').textContent = 'No documents to fetch';
+                    document.getElementById('ddChatStatus').textContent = 'No documents selected';
+                    setDDControlsLocked(false);
                     return;
                 }
-                
-                document.getElementById('ddChatStatus').textContent = `Reading ${docsToFetch.length} documents...`;
-                
-                // Fetch document text
-                const resp = await fetch(`${API_URL}/deepdive/fetch-docs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        docs: docsToFetch,
-                        proxy_host: proxyHost,
-                        proxy_port: proxyPort
-                    })
-                });
-                
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                
-                const data = await resp.json();
+
+                const total = docsToFetch.length;
+                document.getElementById('ddChatStatus').textContent = `Reading ${total} document${total > 1 ? 's' : ''}...`;
+                setDDProgress(0, total, `Starting — 0 of ${total} done`);
+
+                // Fetch documents one by one to show real progress
+                const results = [];
+                for (let i = 0; i < docsToFetch.length; i++) {
+                    const doc = docsToFetch[i];
+                    setDDProgress(i, total, `Reading: ${doc.title} (${i + 1} of ${total})`);
+                    document.getElementById('ddChatStatus').textContent = `Reading ${i + 1}/${total}: ${doc.title}`;
+                    try {
+                        const r = await fetch(`${API_URL}/deepdive/fetch-docs`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                docs: [doc],
+                                proxy_host: proxyHost,
+                                proxy_port: proxyPort
+                            })
+                        });
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        const d = await r.json();
+                        results.push(...(d.docs || []));
+                    } catch (e) {
+                        results.push({ ...doc, text: '', error: e.message });
+                    }
+                    setDDProgress(i + 1, total, `Done: ${i + 1} of ${total}`);
+                }
+
+                setDDProgress(total, total, 'All documents read!');
+                const data = { docs: results };
                 console.log('Fetched documents:', data);
                 
                 // Build context from document text
@@ -2165,14 +2237,17 @@
                 
                 ddAddSystemMessage(statusMsg);
 
-                // ── Unlock controls after reading ──
-                setDDControlsLocked(false);
+                // Mark session as active — controls stay locked, tab switches won't reset state
+                ddSessionActive = true;
+
+                // Hide progress bar after a short delay
+                setTimeout(() => setDDProgress(0, 0), 2000);
                 
             } catch (error) {
                 console.error('Fetch docs error:', error);
                 document.getElementById('ddChatStatus').textContent = `Error fetching documents: ${error.message}`;
                 ddAddSystemMessage(`Could not fetch document text. I can still answer questions using my general knowledge.`);
-                // ── Unlock on error too ──
+                setDDProgress(0, 0);
                 setDDControlsLocked(false);
             }
         }
@@ -2323,9 +2398,18 @@
 
             html += `</div>`;
             
-            // Add "Read Selected Documents" button
+            // Add progress bar + "Read Selected Documents" button
             html += `
                 <div style="margin-top:2rem;text-align:center;">
+                    <div id="ddProgressWrap" style="display:none;margin-bottom:0.75rem;">
+                        <div style="display:flex;justify-content:space-between;font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.3rem;">
+                            <span id="ddProgressLabel">Reading documents...</span>
+                            <span id="ddProgressPct">0%</span>
+                        </div>
+                        <div style="height:6px;border-radius:3px;background:var(--bg-tertiary);overflow:hidden;">
+                            <div id="ddProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent-primary),var(--accent-secondary,#7c3aed));border-radius:3px;transition:width 0.3s ease;"></div>
+                        </div>
+                    </div>
                     <button id="ddReadBtn" onclick="fetchDocumentText()" class="btn" style="width:100%;padding:1rem;font-size:1rem;font-weight:600;">
                         📖 Read Selected Documents
                     </button>
