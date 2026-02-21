@@ -1615,9 +1615,12 @@
         <div class="tab-content" id="adminUsers" style="display:none;">
             <div class="search-section" style="margin-bottom:1.5rem;">
                 <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
-                    <div>
-                        <div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);">👥 Registered Users</div>
-                        <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:0.2rem;">Manage all registered accounts</div>
+                    <div style="display:flex;align-items:center;gap:1rem;">
+                        <div>
+                            <div style="font-size:1.1rem;font-weight:600;color:var(--text-primary);">👥 Registered Users</div>
+                            <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:0.2rem;">Manage all registered accounts</div>
+                        </div>
+                        <div id="adminUserCount" style="display:none;background:linear-gradient(135deg,var(--accent-primary),var(--accent-secondary));color:#000;font-weight:700;font-size:0.9rem;padding:0.3rem 0.9rem;border-radius:20px;"></div>
                     </div>
                     <button class="btn" onclick="loadAdminUsers()" style="padding:0.7rem 1.5rem;font-size:0.9rem;">🔄 Refresh</button>
                 </div>
@@ -1643,6 +1646,50 @@
                         </tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- Admin: Custom Delete Confirm Modal -->
+        <div id="deleteUserModal" style="
+            display:none;position:fixed;inset:0;z-index:99999;
+            background:rgba(0,0,0,0.65);backdrop-filter:blur(4px);
+            align-items:center;justify-content:center;">
+            <div style="
+                background:var(--bg-secondary);border:1px solid var(--border-color);
+                border-radius:16px;padding:2rem;max-width:420px;width:90%;
+                box-shadow:0 20px 60px rgba(0,0,0,0.5);animation:fadeIn 0.2s ease;">
+                <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.2rem;">
+                    <div style="width:48px;height:48px;border-radius:12px;background:rgba(239,68,68,0.15);
+                        border:1px solid rgba(239,68,68,0.3);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;">🗑️</div>
+                    <div>
+                        <div style="font-size:1.1rem;font-weight:700;color:var(--text-primary);">Remove User</div>
+                        <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:0.15rem;">This action cannot be undone</div>
+                    </div>
+                </div>
+                <div style="background:var(--bg-tertiary);border-radius:10px;padding:1rem 1.2rem;margin-bottom:1.5rem;border:1px solid var(--border-color);">
+                    <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.4rem;text-transform:uppercase;letter-spacing:0.5px;">Account to be removed</div>
+                    <div style="display:flex;align-items:center;gap:0.6rem;">
+                        <span style="font-size:1.2rem;">👤</span>
+                        <span id="deleteUserName" style="font-size:1rem;font-weight:600;color:var(--text-primary);font-family:'JetBrains Mono',monospace;"></span>
+                    </div>
+                    <div style="margin-top:0.8rem;font-size:0.82rem;color:#ef4444;">
+                        ⚠️ All watchlist and portfolio data will be permanently deleted.
+                    </div>
+                </div>
+                <div style="display:flex;gap:0.75rem;">
+                    <button onclick="closeDeleteModal()" style="
+                        flex:1;padding:0.85rem;background:var(--bg-tertiary);border:1px solid var(--border-color);
+                        border-radius:10px;color:var(--text-primary);font-size:0.95rem;font-weight:500;
+                        cursor:pointer;transition:background 0.2s;font-family:inherit;"
+                        onmouseenter="this.style.background='var(--border-color)'"
+                        onmouseleave="this.style.background='var(--bg-tertiary)'">Cancel</button>
+                    <button onclick="confirmDeleteUser()" style="
+                        flex:1;padding:0.85rem;background:linear-gradient(135deg,#ef4444,#dc2626);border:none;
+                        border-radius:10px;color:white;font-size:0.95rem;font-weight:600;
+                        cursor:pointer;transition:opacity 0.2s;font-family:inherit;box-shadow:0 4px 12px rgba(239,68,68,0.3);"
+                        onmouseenter="this.style.opacity='0.88'"
+                        onmouseleave="this.style.opacity='1'">Yes, Remove</button>
+                </div>
             </div>
         </div>
     </div>
@@ -2519,8 +2566,12 @@
         // ADMIN — USER MANAGEMENT
         // ══════════════════════════════════════════════════════════════════════
 
+        let _pendingDeleteUser = null;
+
         async function loadAdminUsers() {
             const tbody = document.getElementById('adminUsersTable');
+            const countBadge = document.getElementById('adminUserCount');
+            countBadge.style.display = 'none';
             tbody.innerHTML = `
                 <tr><td colspan="6" class="empty-state">
                     <div class="loading" style="margin:0 auto 1rem;"></div>
@@ -2530,6 +2581,11 @@
                 const resp = await fetch(API_URL + '/admin/users', { credentials: 'include' });
                 if (!resp.ok) throw new Error('Not authorised or server error');
                 const users = await resp.json();
+
+                // Show user count badge
+                countBadge.textContent = `${users.length} user${users.length !== 1 ? 's' : ''}`;
+                countBadge.style.display = 'inline-block';
+
                 if (!users.length) {
                     tbody.innerHTML = `<tr><td colspan="6" class="empty-state">
                         <div class="empty-state-icon">👥</div><p>No users found.</p>
@@ -2571,8 +2627,22 @@
             }
         }
 
-        async function removeUser(username) {
-            if (!confirm(`Remove user "${username}"? This will delete all their data permanently.`)) return;
+        function removeUser(username) {
+            _pendingDeleteUser = username;
+            document.getElementById('deleteUserName').textContent = username;
+            const modal = document.getElementById('deleteUserModal');
+            modal.style.display = 'flex';
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('deleteUserModal').style.display = 'none';
+            _pendingDeleteUser = null;
+        }
+
+        async function confirmDeleteUser() {
+            const username = _pendingDeleteUser;
+            if (!username) return;
+            closeDeleteModal();
             try {
                 const resp = await fetch(API_URL + '/admin/users/remove', {
                     method: 'POST',
@@ -2590,6 +2660,11 @@
                 alert('Error removing user: ' + err.message);
             }
         }
+
+        // Close modal on backdrop click
+        document.getElementById('deleteUserModal').addEventListener('click', function(e) {
+            if (e.target === this) closeDeleteModal();
+        });
 
         // Check if backend is running
         async function checkBackend() {
