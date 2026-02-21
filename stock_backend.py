@@ -152,6 +152,36 @@ def unauthorized():
 # Initialize database
 init_db()
 
+# ── Persistent NSE session (shared across requests, refreshed when needed) ────
+import threading
+_nse_session = None
+_nse_session_lock = threading.Lock()
+_nse_session_time = 0
+
+def get_nse_session(proxies=None, force_refresh=False):
+    """Return a cached NSE session, refreshing if older than 5 minutes."""
+    global _nse_session, _nse_session_time
+    import time
+    with _nse_session_lock:
+        age = time.time() - _nse_session_time
+        if force_refresh or _nse_session is None or age > 300:
+            sess = req.Session()
+            try:
+                sess.get('https://www.nseindia.com',
+                         headers={
+                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                             'Accept': 'text/html,application/xhtml+xml,*/*',
+                             'Accept-Language': 'en-US,en;q=0.9',
+                             'Referer': 'https://www.nseindia.com/',
+                         },
+                         timeout=15, proxies=proxies)
+                print(f"  NSE session refreshed, cookies: {list(sess.cookies.keys())}")
+            except Exception as e:
+                print(f"  NSE session init failed: {e}")
+            _nse_session = sess
+            _nse_session_time = time.time()
+        return _nse_session
+
 @login_manager.user_loader
 def load_user(user_id):
     return get_user_by_id(int(user_id))
@@ -813,12 +843,9 @@ def get_prices_bulk():
 @app.route('/api/announcements', methods=['POST'])
 def get_announcements():
     """
-    Fetch corporate announcements for watchlist symbols.
-    Strategy: fetch each symbol in parallel, each with its own fresh NSE session.
-    NSE is the primary source — it reliably returns announcements for all symbols.
-    BSE is tried first (no session needed) but falls back to NSE.
+    Fetch corporate announcements using a shared NSE session (sequential).
+    Parallel NSE calls get rate-limited — single session is more reliable.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     import datetime
 
     req_data   = request.get_json() or {}
@@ -851,7 +878,7 @@ def get_announcements():
 
     def parse_nse_items(items, symbol, base):
         out = []
-        for item in items:
+        for idx, item in enumerate(items):
             att    = (item.get('attchmntFile') or '').strip()
             title  = (item.get('desc') or item.get('subject') or '').strip()
             raw_dt = (item.get('an_dt') or item.get('date') or '').strip()
@@ -863,7 +890,9 @@ def get_announcements():
             out.append({
                 'symbol': symbol, 'company': company,
                 'title':  title or 'Corporate Announcement',
-                'date':   raw_dt, 'date_ts': dt.timestamp() if dt else 0,
+                'date':   raw_dt,
+                'date_ts': dt.timestamp() if dt else 0,
+                'sort_idx': idx,
                 'category': cat, 'exchange': 'NSE',
                 'attachment_url': att_url,
             })
@@ -871,7 +900,7 @@ def get_announcements():
 
     def parse_bse_items(items, symbol, base):
         out = []
-        for item in items:
+        for idx, item in enumerate(items):
             news_id = str(item.get('NEWSID') or '').strip()
             att     = (item.get('ATTACHMENTNAME') or '').strip()
             title   = (item.get('HEADLINE') or item.get('NEWSSUB') or '').strip()
@@ -881,60 +910,73 @@ def get_announcements():
             if news_id:
                 att_url = f"https://www.bseindia.com/corporates/ann.html?newsid={news_id}"
             elif att:
-                dt_obj = parse_date(raw_dt)
+                dt_obj   = parse_date(raw_dt)
                 days_ago = (datetime.datetime.now() - dt_obj).days if dt_obj else 999
-                folder = 'AttachLive' if days_ago <= 30 else 'AttachHis'
-                att_url = f"https://www.bseindia.com/xml-data/corpfiling/{folder}/{att}"
+                folder   = 'AttachLive' if days_ago <= 30 else 'AttachHis'
+                att_url  = f"https://www.bseindia.com/xml-data/corpfiling/{folder}/{att}"
             else:
                 att_url = ''
             dt = parse_date(raw_dt)
             out.append({
                 'symbol': symbol, 'company': company,
                 'title':  title or 'Corporate Announcement',
-                'date':   raw_dt, 'date_ts': dt.timestamp() if dt else 0,
+                'date':   raw_dt,
+                'date_ts': dt.timestamp() if dt else 0,
+                'sort_idx': idx,
                 'category': cat, 'exchange': 'BSE',
                 'attachment_url': att_url,
             })
         return out
 
-    def fetch_for_symbol(symbol):
-        """Fetch announcements for one symbol. Each call gets its own NSE session."""
-        base = symbol.replace('.NS', '').replace('.BO', '')
-        results = []
+    # Resolve BSE codes upfront
+    bse_codes = {}
+    try:
+        from bse import BSE as BsePkg
+        import tempfile
+        with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
+            for sym in symbols:
+                base = sym.replace('.NS', '').replace('.BO', '')
+                try:
+                    r = bpkg.lookup(base)
+                    if r and r.get('bse_code'):
+                        bse_codes[base] = str(r['bse_code'])
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
-        # ── Try BSE first (no session needed, faster) ─────────────────────────
-        # Use AnnSubCategoryGetData with strSearch=C — doesn't need date range
-        # Resolve BSE scrip code via bse package
-        bse_code = ''
+    for sym in symbols:
+        base = sym.replace('.NS', '').replace('.BO', '')
+        if base in bse_codes:
+            continue
         try:
-            from bse import BSE as BsePkg
-            import tempfile
-            with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
-                r = bpkg.lookup(base)
-                if r and r.get('bse_code'):
-                    bse_code = str(r['bse_code'])
+            r = req.get(
+                f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
+                f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
+                f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base}",
+                headers=BSE_HDR, timeout=8, proxies=proxies)
+            if r.ok:
+                for item in r.json().get('Table', []):
+                    sym_val = (item.get('nsesymbol') or item.get('NSESymbol') or '').upper()
+                    if sym_val == base:
+                        code = str(item.get('scripcode') or item.get('Scripcode') or '')
+                        if code:
+                            bse_codes[base] = code
+                        break
         except Exception:
             pass
 
-        # fetchComp fallback for scrip code
-        if not bse_code:
-            try:
-                r = req.get(
-                    f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                    f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
-                    f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base}",
-                    headers=BSE_HDR, timeout=8, proxies=proxies)
-                if r.ok:
-                    for item in r.json().get('Table', []):
-                        sym_val = (item.get('nsesymbol') or item.get('NSESymbol') or '').upper()
-                        if sym_val == base:
-                            code = str(item.get('scripcode') or item.get('Scripcode') or '')
-                            if code:
-                                bse_code = code
-                            break
-            except Exception:
-                pass
+    # Use shared persistent NSE session
+    nse_sess = get_nse_session(proxies=proxies)
+    all_ann = []
 
+    for symbol in symbols:
+        base     = symbol.replace('.NS', '').replace('.BO', '')
+        bse_code = bse_codes.get(base, '')
+        got      = False
+        print(f"  [{base}] BSE:{bse_code or '?'}")
+
+        # BSE first (no session needed, fast)
         if bse_code:
             try:
                 today     = datetime.date.today()
@@ -945,62 +987,40 @@ def get_announcements():
                     f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
                     f"?pageno=1&strCat=-1&strPrevDate={from_dt}&strScrip={bse_code}"
                     f"&strSearch=C&strToDate={to_dt}&strType=C&subcategory=-1",
-                    headers=BSE_HDR, timeout=15, proxies=proxies)
+                    headers=BSE_HDR, timeout=12, proxies=proxies)
                 if r.ok:
-                    payload = r.json()
-                    items = payload if isinstance(payload, list) else payload.get('Table', [])
-                    print(f"  BSE [{base}]: {len(items)} items")
+                    items = r.json() if isinstance(r.json(), list) else r.json().get('Table', [])
                     if items:
-                        results = parse_bse_items(items[:20], symbol, base)
+                        print(f"    BSE: {len(items)} items")
+                        all_ann.extend(parse_bse_items(items[:20], symbol, base))
+                        got = True
             except Exception as e:
-                print(f"  BSE [{base}] error: {e}")
+                print(f"    BSE err: {e}")
 
-        # ── NSE fallback (own fresh session per symbol) ────────────────────────
-        if not results:
-            try:
-                sess = req.Session()
-                # Get NSE homepage to obtain cookies — critical for API to work
-                sess.get(
-                    'https://www.nseindia.com',
-                    headers={**NSE_HDR, 'Accept': 'text/html,application/xhtml+xml,*/*'},
-                    timeout=15, proxies=proxies)
+        # NSE fallback with shared session
+        if not got:
+            for url in [
+                f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
+                f"https://www.nseindia.com/api/corporate-announcements?symbol={base}",
+            ]:
+                try:
+                    r = nse_sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+                    if r.ok:
+                        d = r.json()
+                        items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
+                        if items:
+                            print(f"    NSE: {len(items)} items")
+                            all_ann.extend(parse_nse_items(items[:20], symbol, base))
+                            got = True
+                            break
+                except Exception as e:
+                    print(f"    NSE err {url[-35:]}: {e}")
+                    nse_sess = get_nse_session(proxies=proxies, force_refresh=True)
 
-                # Try both URL formats NSE uses
-                for url in [
-                    f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
-                    f"https://www.nseindia.com/api/corporate-announcements?symbol={base}",
-                ]:
-                    try:
-                        r = sess.get(url, headers=NSE_HDR, timeout=20, proxies=proxies)
-                        if r.ok:
-                            d = r.json()
-                            items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
-                            if items:
-                                print(f"  NSE [{base}]: {len(items)} items")
-                                results = parse_nse_items(items[:20], symbol, base)
-                                break
-                    except Exception as e:
-                        print(f"  NSE [{base}] {url[-40:]}: {e}")
-            except Exception as e:
-                print(f"  NSE session [{base}]: {e}")
+        if not got:
+            print(f"    !! No announcements for {base}")
 
-        if not results:
-            print(f"  !! No announcements for {base}")
-
-        return results
-
-    # ── Fetch all symbols in parallel ─────────────────────────────────────────
-    all_ann = []
-    with ThreadPoolExecutor(max_workers=min(len(symbols), 5)) as executor:
-        futures = {executor.submit(fetch_for_symbol, sym): sym for sym in symbols}
-        for future in as_completed(futures):
-            try:
-                all_ann.extend(future.result())
-            except Exception as e:
-                print(f"  Worker error: {e}")
-
-    # ── Sort, dedup, return ───────────────────────────────────────────────────
-    all_ann.sort(key=lambda x: x['date_ts'], reverse=True)
+    all_ann.sort(key=lambda x: (-x['date_ts'], x.get('sort_idx', 0)))
     seen, deduped = set(), []
     for a in all_ann:
         key = (a['symbol'], a['title'][:50], a['date'][:10])
@@ -1013,7 +1033,8 @@ def get_announcements():
         print(f"  [{a['exchange']}] {a['date'][:10]}  {a['company']}: {a['title'][:55]}")
 
     for a in deduped:
-        del a['date_ts']
+        a.pop('date_ts', None)
+        a.pop('sort_idx', None)
 
     return jsonify({'announcements': deduped[:60]})
 
