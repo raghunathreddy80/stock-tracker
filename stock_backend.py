@@ -158,6 +158,10 @@ _nse_session = None
 _nse_session_lock = threading.Lock()
 _nse_session_time = 0
 
+# ── Announcement cache — serve last good result when NSE is unavailable ───────
+_ann_cache = {}          # key: frozenset(symbols) → list of announcements
+_ann_cache_time = {}     # key: frozenset(symbols) → timestamp
+
 def get_nse_session(proxies=None, force_refresh=False):
     """Return a cached NSE session, refreshing if older than 5 minutes."""
     global _nse_session, _nse_session_time
@@ -843,11 +847,9 @@ def get_prices_bulk():
 @app.route('/api/announcements', methods=['POST'])
 def get_announcements():
     """
-    Fetch corporate announcements using a shared NSE session (sequential).
-    Parallel NSE calls get rate-limited — single session is more reliable.
+    Fetch corporate announcements for watchlist symbols from BSE (primary) + NSE (fallback).
+    BSE API is the most reliable — no cookie needed, just correct headers.
     """
-    import datetime
-
     req_data   = request.get_json() or {}
     symbols    = req_data.get('symbols', [])
     proxy_host = req_data.get('proxy_host', '').strip()
@@ -857,170 +859,243 @@ def get_announcements():
         return jsonify({'announcements': []})
 
     proxies = make_proxies(proxy_host, proxy_port)
-    print(f"\n[announcements] {len(symbols)} symbols")
+    print(f"\n[announcements] {len(symbols)} symbols, proxy={proxies.get('http','none') if proxies else 'none'}")
 
+    import datetime
+
+    # BSE needs Origin + sec-fetch headers to avoid 403
     BSE_HDR = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept':          'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin':          'https://www.bseindia.com',
-        'Referer':         'https://www.bseindia.com/',
-        'sec-fetch-site':  'same-site',
-        'sec-fetch-mode':  'cors',
-        'sec-fetch-dest':  'empty',
+        'User-Agent':        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept':            'application/json, text/plain, */*',
+        'Accept-Language':   'en-US,en;q=0.9',
+        'Origin':            'https://www.bseindia.com',
+        'Referer':           'https://www.bseindia.com/',
+        'sec-fetch-site':    'same-site',
+        'sec-fetch-mode':    'cors',
+        'sec-fetch-dest':    'empty',
     }
     NSE_HDR = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept':          'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer':         'https://www.nseindia.com/',
+        'User-Agent':        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept':            'application/json, text/plain, */*',
+        'Accept-Language':   'en-US,en;q=0.9',
+        'Referer':           'https://www.nseindia.com/',
     }
 
-    def parse_nse_items(items, symbol, base):
-        out = []
-        for idx, item in enumerate(items):
-            att    = (item.get('attchmntFile') or '').strip()
-            title  = (item.get('desc') or item.get('subject') or '').strip()
-            raw_dt = (item.get('an_dt') or item.get('date') or '').strip()
-            company= (item.get('comp') or item.get('company') or base)
-            cat    = (item.get('smIndustry') or item.get('category') or 'General')
-            att_url= (att if att.startswith('http')
-                      else f"https://nsearchives.nseindia.com/corporate/{att}") if att else ''
-            dt = parse_date(raw_dt)
-            out.append({
-                'symbol': symbol, 'company': company,
-                'title':  title or 'Corporate Announcement',
-                'date':   raw_dt,
-                'date_ts': dt.timestamp() if dt else 0,
-                'sort_idx': idx,
-                'category': cat, 'exchange': 'NSE',
-                'attachment_url': att_url,
-            })
-        return out
+    def safe_get(url, hdrs, sess=None, timeout=12):
+        try:
+            fn = sess.get if sess else req.get
+            r  = fn(url, headers=hdrs, timeout=timeout, proxies=proxies, allow_redirects=True)
+            print(f"  HTTP {r.status_code}  {url[-80:]}")
+            return r if r.ok else None
+        except Exception as e:
+            print(f"  FAIL {url[-70:]}: {e}")
+            return None
 
-    def parse_bse_items(items, symbol, base):
-        out = []
-        for idx, item in enumerate(items):
-            news_id = str(item.get('NEWSID') or '').strip()
-            att     = (item.get('ATTACHMENTNAME') or '').strip()
-            title   = (item.get('HEADLINE') or item.get('NEWSSUB') or '').strip()
-            raw_dt  = (item.get('NEWS_DT') or item.get('DT_TM') or '').strip()
-            company = (item.get('SLONGNAME') or item.get('COMPANYNAME') or base)
-            cat     = (item.get('CATEGORYNAME') or item.get('NEWSCATNAME') or 'General')
-            if news_id:
-                att_url = f"https://www.bseindia.com/corporates/ann.html?newsid={news_id}"
-            elif att:
-                dt_obj   = parse_date(raw_dt)
-                days_ago = (datetime.datetime.now() - dt_obj).days if dt_obj else 999
-                folder   = 'AttachLive' if days_ago <= 30 else 'AttachHis'
-                att_url  = f"https://www.bseindia.com/xml-data/corpfiling/{folder}/{att}"
+    def bse_att_url(news_id, att, raw_dt=''):
+        """
+        BSE attachment URL logic:
+        - newsid page always works (opens the BSE filing detail page with PDF link)
+        - Direct PDF: AttachLive = recent (last 30 days), AttachHis = older
+        According to screener.in behavior:
+          Annual reports → AttachHis (filed once a year, become historical quickly)
+          Recent concalls/announcements → AttachLive (filed within last month)
+        """
+        if news_id:
+            return f"https://www.bseindia.com/corporates/ann.html?newsid={news_id}"
+        if att:
+            # Determine folder based on filing date
+            dt = parse_date(raw_dt) if raw_dt else None
+            if dt:
+                import datetime
+                days_ago = (datetime.datetime.now() - dt).days
+                folder = 'AttachLive' if days_ago <= 30 else 'AttachHis'
             else:
-                att_url = ''
+                # No date → assume AttachHis (safer for older documents)
+                folder = 'AttachHis'
+            return f"https://www.bseindia.com/xml-data/corpfiling/{folder}/{att}"
+        return ''
+
+    def parse_items(items, symbol, base, exchange):
+        out = []
+        for item in items:
+            if exchange == 'BSE':
+                news_id = str(item.get('NEWSID') or '').strip()
+                att     = (item.get('ATTACHMENTNAME') or '').strip()
+                title   = (item.get('HEADLINE') or item.get('NEWSSUB') or '').strip()
+                raw_dt  = (item.get('NEWS_DT') or item.get('DT_TM') or '').strip()
+                company = (item.get('SLONGNAME') or item.get('COMPANYNAME') or base)
+                cat     = (item.get('CATEGORYNAME') or item.get('NEWSCATNAME') or 'General')
+                att_url = bse_att_url(news_id, att, raw_dt)
+            else:
+                news_id = ''
+                att     = (item.get('attchmntFile') or '').strip()
+                title   = (item.get('desc') or item.get('subject') or '').strip()
+                raw_dt  = (item.get('an_dt') or item.get('date') or '').strip()
+                company = (item.get('comp') or item.get('company') or base)
+                cat     = (item.get('smIndustry') or item.get('category') or 'General')
+                att_url = (att if att.startswith('http')
+                           else f"https://nsearchives.nseindia.com/corporate/{att}") if att else ''
             dt = parse_date(raw_dt)
+            ts = dt.timestamp() if dt else 0
             out.append({
                 'symbol': symbol, 'company': company,
                 'title':  title or 'Corporate Announcement',
-                'date':   raw_dt,
-                'date_ts': dt.timestamp() if dt else 0,
-                'sort_idx': idx,
-                'category': cat, 'exchange': 'BSE',
+                'date':   raw_dt, 'date_ts': ts,
+                'category':       cat,
+                'exchange':       exchange,
                 'attachment_url': att_url,
             })
         return out
 
-    # Resolve BSE codes upfront
-    bse_codes = {}
+    # ── Step 1: resolve BSE scrip codes for all symbols ───────────────────────
+    bse_codes = {}   # base → numeric BSE scrip code string
+
+    # Try bse pip package first (most reliable)
     try:
         from bse import BSE as BsePkg
         import tempfile
         with BsePkg(download_folder=tempfile.gettempdir()) as bpkg:
             for sym in symbols:
-                base = sym.replace('.NS', '').replace('.BO', '')
+                base = sym.replace('.NS','').replace('.BO','')
                 try:
                     r = bpkg.lookup(base)
                     if r and r.get('bse_code'):
                         bse_codes[base] = str(r['bse_code'])
                 except Exception:
                     pass
-    except Exception:
-        pass
+        print(f"  BSE pkg codes: {bse_codes}")
+    except Exception as e:
+        print(f"  BSE pkg not available: {e}")
 
+    # fetchComp for any still missing
     for sym in symbols:
-        base = sym.replace('.NS', '').replace('.BO', '')
+        base = sym.replace('.NS','').replace('.BO','')
         if base in bse_codes:
             continue
-        try:
-            r = req.get(
-                f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
-                f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
-                f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base}",
-                headers=BSE_HDR, timeout=8, proxies=proxies)
-            if r.ok:
+        r = safe_get(
+            f"https://api.bseindia.com/BseIndiaAPI/api/fetchComp/w"
+            f"?companySortOrder=A&industry=&issuerType=C&turnover=&companyType="
+            f"&mktcap=&segment=&status=Active&indexType=&pageno=1&pagesize=25&search={base}",
+            BSE_HDR, timeout=8)
+        if r:
+            try:
                 for item in r.json().get('Table', []):
                     sym_val = (item.get('nsesymbol') or item.get('NSESymbol') or '').upper()
                     if sym_val == base:
                         code = str(item.get('scripcode') or item.get('Scripcode') or '')
                         if code:
                             bse_codes[base] = code
+                            print(f"  fetchComp: {base} → {code}")
                         break
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-    # Use shared persistent NSE session
-    nse_sess = get_nse_session(proxies=proxies)
+    print(f"  Resolved codes: {bse_codes}")
+
+    # ── Step 2: NSE session (built once for fallback) ─────────────────────────
+    nse_sess = req.Session()
+    try:
+        nse_sess.get('https://www.nseindia.com',
+                     headers={**NSE_HDR, 'Accept': 'text/html,application/xhtml+xml,*/*'},
+                     timeout=12, proxies=proxies)
+        print(f"  NSE cookies: {list(nse_sess.cookies.keys())}")
+    except Exception as e:
+        print(f"  NSE session: {e}")
+
+    # ── Step 3: fetch per symbol ──────────────────────────────────────────────
     all_ann = []
 
     for symbol in symbols:
-        base     = symbol.replace('.NS', '').replace('.BO', '')
+        base     = symbol.replace('.NS','').replace('.BO','')
         bse_code = bse_codes.get(base, '')
         got      = False
-        print(f"  [{base}] BSE:{bse_code or '?'}")
+        print(f"\n--- {base} (BSE code: {bse_code or 'unknown'}) ---")
 
-        # BSE first (no session needed, fast)
+        # ── BSE AnnGetData: most recent filings, per scrip code ───────────────
         if bse_code:
-            try:
-                today     = datetime.date.today()
-                month_ago = today - datetime.timedelta(days=30)
-                from_dt   = month_ago.strftime('%d%%2F%m%%2F%Y')
-                to_dt     = today.strftime('%d%%2F%m%%2F%Y')
-                r = req.get(
-                    f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
-                    f"?pageno=1&strCat=-1&strPrevDate={from_dt}&strScrip={bse_code}"
-                    f"&strSearch=C&strToDate={to_dt}&strType=C&subcategory=-1",
-                    headers=BSE_HDR, timeout=12, proxies=proxies)
-                if r.ok:
-                    items = r.json() if isinstance(r.json(), list) else r.json().get('Table', [])
-                    if items:
-                        print(f"    BSE: {len(items)} items")
-                        all_ann.extend(parse_bse_items(items[:20], symbol, base))
-                        got = True
-            except Exception as e:
-                print(f"    BSE err: {e}")
+            r = safe_get(
+                f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
+                f"?strCat=-1&strPrevDate=&strScrip={bse_code}&strSearch=P&strToDate=&strType=C",
+                BSE_HDR, timeout=15)
+            if r:
+                try:
+                    payload = r.json()
+                    items = payload if isinstance(payload, list) else \
+                            payload.get('Table', payload.get('Data', []))
+                    print(f"  BSE AnnGetData: {len(items)} items")
+                    parsed = parse_items(items, symbol, base, 'BSE')
+                    all_ann.extend(parsed)
+                    got = bool(parsed)
+                    for a in parsed[:3]:
+                        print(f"    [{a['date'][:10]}] {a['title'][:60]}")
+                except Exception as e:
+                    print(f"  BSE AnnGetData parse error: {e}")
 
-        # NSE fallback with shared session
+        # ── BSE AnnSubCategoryGetData: date-range search, scrip code required ─
+        if not got and bse_code:
+            today    = datetime.date.today()
+            week_ago = today - datetime.timedelta(days=7)
+            # This API uses DD/MM/YYYY format (URL-encoded)
+            from_dt  = week_ago.strftime('%d%%2F%m%%2F%Y')   # 10%2F02%2F2026
+            to_dt    = today.strftime('%d%%2F%m%%2F%Y')
+            r = safe_get(
+                f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
+                f"?pageno=1&strCat=-1&strPrevDate={from_dt}&strScrip={bse_code}"
+                f"&strSearch=C&strToDate={to_dt}&strType=C&subcategory=-1",
+                BSE_HDR, timeout=15)
+            if r:
+                try:
+                    payload = r.json()
+                    items = payload if isinstance(payload, list) else payload.get('Table', [])
+                    print(f"  BSE AnnSubCat: {len(items)} items")
+                    parsed = parse_items(items, symbol, base, 'BSE')
+                    all_ann.extend(parsed)
+                    got = bool(parsed)
+                except Exception as e:
+                    print(f"  BSE AnnSubCat parse error: {e}")
+
+        # ── BSE Msource search: works with NSE symbol directly (no scrip code) ─
+        if not got:
+            r = safe_get(
+                f"https://api.bseindia.com/Msource/1D/getQouteSearch.aspx?Type=EQ&text={base}&flag=site",
+                {**BSE_HDR, 'Accept': 'application/json, text/plain, */*'}, timeout=8)
+            if r:
+                try:
+                    hits = r.json()
+                    if isinstance(hits, list) and hits:
+                        code = str(hits[0].get('scripcode',''))
+                        if code and code not in bse_codes.values():
+                            bse_codes[base] = code
+                            bse_code = code
+                            print(f"  Msource found code: {code}")
+                except Exception:
+                    pass
+
+        # ── NSE fallback ──────────────────────────────────────────────────────
         if not got:
             for url in [
-                f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
                 f"https://www.nseindia.com/api/corporate-announcements?symbol={base}",
+                f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
             ]:
-                try:
-                    r = nse_sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
-                    if r.ok:
+                r = safe_get(url, NSE_HDR, sess=nse_sess, timeout=12)
+                if r:
+                    try:
                         d = r.json()
                         items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
                         if items:
-                            print(f"    NSE: {len(items)} items")
-                            all_ann.extend(parse_nse_items(items[:20], symbol, base))
-                            got = True
+                            print(f"  NSE: {len(items)} items")
+                            parsed = parse_items(items[:15], symbol, base, 'NSE')
+                            all_ann.extend(parsed)
+                            got = bool(parsed)
                             break
-                except Exception as e:
-                    print(f"    NSE err {url[-35:]}: {e}")
-                    nse_sess = get_nse_session(proxies=proxies, force_refresh=True)
+                    except Exception as e:
+                        print(f"  NSE parse error: {e}")
 
         if not got:
-            print(f"    !! No announcements for {base}")
+            print(f"  !! No announcements found for {base}")
 
-    all_ann.sort(key=lambda x: (-x['date_ts'], x.get('sort_idx', 0)))
+    # ── Sort, dedup, return ───────────────────────────────────────────────────
+    all_ann.sort(key=lambda x: x['date_ts'], reverse=True)
     seen, deduped = set(), []
     for a in all_ann:
         key = (a['symbol'], a['title'][:50], a['date'][:10])
@@ -1028,13 +1103,12 @@ def get_announcements():
             seen.add(key)
             deduped.append(a)
 
-    print(f"\n[done] {len(deduped)} announcements from {len(symbols)} symbols")
+    print(f"\n[done] {len(deduped)} unique announcements from {len(symbols)} symbols")
     for a in deduped[:6]:
         print(f"  [{a['exchange']}] {a['date'][:10]}  {a['company']}: {a['title'][:55]}")
 
     for a in deduped:
-        a.pop('date_ts', None)
-        a.pop('sort_idx', None)
+        del a['date_ts']
 
     return jsonify({'announcements': deduped[:60]})
 

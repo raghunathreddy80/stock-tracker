@@ -1739,6 +1739,11 @@
 
             // Kick off live price poll immediately (no delay)
             pollPrices();
+
+            // Pre-fetch announcements in background so tab loads instantly when clicked
+            if (watchlist.length > 0) {
+                updateAnnouncements();
+            }
         }
 
         async function loadFromStorage() {
@@ -1811,7 +1816,7 @@
             }
 
             if (index === 1) updatePortfolioChart();
-            if (index === 2) updateAnnouncements();
+            if (index === 2 && !announcementsInitialized) updateAnnouncements();
             if (index === 3) initDeepDive();
         }
 
