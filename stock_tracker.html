@@ -1712,63 +1712,61 @@
         const PORTFOLIO_KEY = 'stockTracker_portfolio';
         let watchlist = [];
         let portfolio = [];
+        let watchlistLoaded = false;
+        let portfolioLoaded = false;
         let updateInterval;
         let chartInstance = null;
 
         async function init() {
             // Check if backend is running
             checkBackend();
-            
-            await loadFromStorage(); // Wait for data to load from database
-
-            // Seed priceCache from DB-stored prices so table renders with real values instantly
-            [...watchlist, ...portfolio].forEach(s => {
-                if (s.symbol && (s.current_price || s.price) > 0) {
-                    priceCache[s.symbol] = {
-                        price: s.current_price || s.price || 0,
-                        change: s.change || 0,
-                        changePercent: s.changePercent || 0,
-                        volume: s.volume || 0
-                    };
-                }
-            });
-
-            renderWatchlist();
-            renderPortfolio();
             startAutoUpdate();
 
-            // Kick off live price poll immediately (no delay)
-            pollPrices();
-
-            // Pre-fetch announcements in background so tab loads instantly when clicked
-            if (watchlist.length > 0) {
-                updateAnnouncements();
-            }
+            // Load data from DB in background — render as each arrives
+            // (no premature empty render — rows appear with skeleton price cells)
+            loadFromStorage();
         }
 
         async function loadFromStorage() {
-            // Load watchlist from database
+            // Load watchlist and portfolio in parallel — render each as it arrives
+            const [wlResult, pfResult] = await Promise.allSettled([
+                fetch(API_URL + '/watchlist', { credentials: 'include' }),
+                fetch(API_URL + '/portfolio', { credentials: 'include' })
+            ]);
+
+            // Watchlist arrives — render immediately
             try {
-                const watchlistResponse = await fetch(API_URL + '/watchlist', {
-                    credentials: 'include'
-                });
-                if (watchlistResponse.ok) {
-                    watchlist = await watchlistResponse.json();
+                if (wlResult.status === 'fulfilled' && wlResult.value.ok) {
+                    watchlist = await wlResult.value.json();
+                    watchlistLoaded = true;
                     console.log('Loaded watchlist from database:', watchlist);
+                    // Seed price cache so rows show last-known prices instantly
+                    watchlist.forEach(s => {
+                        if (s.symbol && (s.current_price || s.price) > 0) {
+                            priceCache[s.symbol] = {
+                                price: s.current_price || s.price || 0,
+                                change: s.change || 0,
+                                changePercent: s.changePercent || 0,
+                                volume: s.volume || 0
+                            };
+                        }
+                    });
+                    renderWatchlist();
+                    pollPrices(); // kick off live prices now that we have symbols
+                    if (watchlist.length > 0) updateAnnouncements();
                 }
             } catch (error) {
                 console.error('Error loading watchlist:', error);
                 watchlist = [];
             }
-            
-            // Load portfolio from database
+
+            // Portfolio arrives — render immediately
             try {
-                const portfolioResponse = await fetch(API_URL + '/portfolio', {
-                    credentials: 'include'
-                });
-                if (portfolioResponse.ok) {
-                    portfolio = await portfolioResponse.json();
+                if (pfResult.status === 'fulfilled' && pfResult.value.ok) {
+                    portfolio = await pfResult.value.json();
+                    portfolioLoaded = true;
                     console.log('Loaded portfolio from database:', portfolio);
+                    renderPortfolio();
                 }
             } catch (error) {
                 console.error('Error loading portfolio:', error);
@@ -2968,14 +2966,26 @@
             const tbody = document.getElementById('watchlistTable');
             
             if (watchlist.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="6" class="empty-state">
-                            <div class="empty-state-icon">📈</div>
-                            <p>No stocks in watchlist. Add stocks to start tracking.</p>
-                        </td>
-                    </tr>
-                `;
+                if (!watchlistLoaded) {
+                    // Still loading — show skeleton rows
+                    tbody.innerHTML = [1,2,3].map(() => `
+                        <tr>
+                            <td><span class="price-skeleton" style="width:120px;"></span></td>
+                            <td><span class="price-skeleton"></span></td>
+                            <td><span class="price-skeleton"></span></td>
+                            <td><span class="price-skeleton"></span></td>
+                            <td></td><td></td>
+                        </tr>`).join('');
+                } else {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <div class="empty-state-icon">📈</div>
+                                <p>No stocks in watchlist. Add stocks to start tracking.</p>
+                            </td>
+                        </tr>
+                    `;
+                }
                 return;
             }
 
