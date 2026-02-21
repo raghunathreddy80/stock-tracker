@@ -862,6 +862,9 @@ def get_announcements():
     print(f"\n[announcements] {len(symbols)} symbols, proxy={proxies.get('http','none') if proxies else 'none'}")
 
     import datetime
+    import time
+
+    cache_key = frozenset(symbols)
 
     # BSE needs Origin + sec-fetch headers to avoid 403
     BSE_HDR = {
@@ -1031,12 +1034,11 @@ def get_announcements():
                 except Exception as e:
                     print(f"  BSE AnnGetData parse error: {e}")
 
-        # ── BSE AnnSubCategoryGetData: date-range search, scrip code required ─
+        # ── BSE AnnSubCategoryGetData: last 24 hours ─
         if not got and bse_code:
             today    = datetime.date.today()
-            week_ago = today - datetime.timedelta(days=7)
-            # This API uses DD/MM/YYYY format (URL-encoded)
-            from_dt  = week_ago.strftime('%d%%2F%m%%2F%Y')   # 10%2F02%2F2026
+            days_ago = today - datetime.timedelta(days=1)
+            from_dt  = days_ago.strftime('%d%%2F%m%%2F%Y')
             to_dt    = today.strftime('%d%%2F%m%%2F%Y')
             r = safe_get(
                 f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
@@ -1083,11 +1085,15 @@ def get_announcements():
                         d = r.json()
                         items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
                         if items:
-                            print(f"  NSE: {len(items)} items")
-                            parsed = parse_items(items[:15], symbol, base, 'NSE')
-                            all_ann.extend(parsed)
-                            got = bool(parsed)
-                            break
+                            # Filter to last 24 hours only
+                            cutoff = datetime.datetime.now() - datetime.timedelta(hours=24)
+                            items_24h = [i for i in items if (parse_date(i.get('an_dt') or i.get('date') or '') or datetime.datetime.min) >= cutoff]
+                            if items_24h:
+                                print(f"  NSE: {len(items_24h)} items (24h)")
+                                parsed = parse_items(items_24h, symbol, base, 'NSE')
+                                all_ann.extend(parsed)
+                                got = bool(parsed)
+                                break
                     except Exception as e:
                         print(f"  NSE parse error: {e}")
 
@@ -1109,6 +1115,16 @@ def get_announcements():
 
     for a in deduped:
         del a['date_ts']
+
+    # Save to cache if we got results; otherwise serve stale cache
+    if deduped:
+        _ann_cache[cache_key] = deduped
+        _ann_cache_time[cache_key] = time.time()
+        print(f"  [cache] Saved {len(deduped)} announcements")
+    elif cache_key in _ann_cache:
+        age_mins = int((time.time() - _ann_cache_time.get(cache_key, 0)) / 60)
+        print(f"  [cache] Serving {len(_ann_cache[cache_key])} cached announcements ({age_mins}m old)")
+        deduped = _ann_cache[cache_key]
 
     return jsonify({'announcements': deduped[:60]})
 
