@@ -578,6 +578,63 @@ def health():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/admin/users', methods=['GET'])
+@login_required
+def admin_get_users():
+    """
+    Admin endpoint: list all registered users with watchlist/portfolio counts.
+    Only accessible when logged in.
+    """
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        if USE_POSTGRES:
+            c.execute('''
+                SELECT u.id, u.username, u.email, u.created_at, u.last_login,
+                       COUNT(DISTINCT w.id) AS watchlist_count,
+                       COUNT(DISTINCT p.id) AS portfolio_count
+                FROM users u
+                LEFT JOIN watchlists w ON w.user_id = u.id
+                LEFT JOIN portfolio  p ON p.user_id = u.id
+                GROUP BY u.id, u.username, u.email, u.created_at, u.last_login
+                ORDER BY u.created_at DESC
+            ''')
+        else:
+            c.execute('''
+                SELECT u.id, u.username, u.email, u.created_at, u.last_login,
+                       COUNT(DISTINCT w.id) AS watchlist_count,
+                       COUNT(DISTINCT p.id) AS portfolio_count
+                FROM users u
+                LEFT JOIN watchlists w ON w.user_id = u.id
+                LEFT JOIN portfolio  p ON p.user_id = u.id
+                GROUP BY u.id
+                ORDER BY u.created_at DESC
+            ''')
+
+        rows = c.fetchall()
+        conn.close()
+
+        users = []
+        for row in rows:
+            row = dict(row)
+            users.append({
+                'id':              row['id'],
+                'username':        row['username'],
+                'email':           row['email'],
+                'created_at':      str(row.get('created_at') or ''),
+                'last_login':      str(row.get('last_login') or ''),
+                'watchlist_count': row.get('watchlist_count', 0),
+                'portfolio_count': row.get('portfolio_count', 0),
+            })
+
+        return jsonify({'users': users, 'total': len(users)})
+
+    except Exception as e:
+        print(f"Admin users error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/fix-watchlist-dupes')
 def fix_watchlist_dupes():
     """TEMPORARY: Delete stuck/duplicate watchlist rows so they can be re-added."""
@@ -888,15 +945,40 @@ def get_announcements():
 
     print(f"  Resolved codes: {bse_codes}")
 
-    # ── Step 2: NSE session (built once for fallback) ─────────────────────────
-    nse_sess = req.Session()
-    try:
-        nse_sess.get('https://www.nseindia.com',
+    # ── Step 2: NSE session (built once for fallback, with refresh capability) ──
+    def make_nse_session():
+        """Create a fresh NSE session with cookies."""
+        sess = req.Session()
+        try:
+            sess.get('https://www.nseindia.com',
                      headers={**NSE_HDR, 'Accept': 'text/html,application/xhtml+xml,*/*'},
-                     timeout=12, proxies=proxies)
-        print(f"  NSE cookies: {list(nse_sess.cookies.keys())}")
-    except Exception as e:
-        print(f"  NSE session: {e}")
+                     timeout=15, proxies=proxies)
+            print(f"  NSE cookies: {list(sess.cookies.keys())}")
+        except Exception as e:
+            print(f"  NSE session init: {e}")
+        return sess
+
+    nse_sess = make_nse_session()
+
+    def nse_fetch_announcements(base, sess):
+        """Fetch NSE announcements, refreshing session once on failure."""
+        # NSE requires ?index=equities&symbol=X (not just ?symbol=X for most stocks)
+        urls = [
+            f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
+            f"https://www.nseindia.com/api/corporate-announcements?symbol={base}",
+        ]
+        for url in urls:
+            r = safe_get(url, NSE_HDR, sess=sess, timeout=15)
+            if r:
+                try:
+                    d = r.json()
+                    items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
+                    if items:
+                        print(f"  NSE: {len(items)} items")
+                        return items
+                except Exception as e:
+                    print(f"  NSE parse error: {e}")
+        return None
 
     # ── Step 3: fetch per symbol ──────────────────────────────────────────────
     all_ann = []
@@ -907,32 +989,12 @@ def get_announcements():
         got      = False
         print(f"\n--- {base} (BSE code: {bse_code or 'unknown'}) ---")
 
-        # ── BSE AnnGetData: most recent filings, per scrip code ───────────────
+        # ── BSE AnnSubCategoryGetData: date-range search (most reliable with strSearch=C) ──
+        # strSearch=P (by period) needs dates; strSearch=C (by scrip code) works without dates
         if bse_code:
-            r = safe_get(
-                f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
-                f"?strCat=-1&strPrevDate=&strScrip={bse_code}&strSearch=P&strToDate=&strType=C",
-                BSE_HDR, timeout=15)
-            if r:
-                try:
-                    payload = r.json()
-                    items = payload if isinstance(payload, list) else \
-                            payload.get('Table', payload.get('Data', []))
-                    print(f"  BSE AnnGetData: {len(items)} items")
-                    parsed = parse_items(items, symbol, base, 'BSE')
-                    all_ann.extend(parsed)
-                    got = bool(parsed)
-                    for a in parsed[:3]:
-                        print(f"    [{a['date'][:10]}] {a['title'][:60]}")
-                except Exception as e:
-                    print(f"  BSE AnnGetData parse error: {e}")
-
-        # ── BSE AnnSubCategoryGetData: date-range search, scrip code required ─
-        if not got and bse_code:
             today    = datetime.date.today()
-            week_ago = today - datetime.timedelta(days=7)
-            # This API uses DD/MM/YYYY format (URL-encoded)
-            from_dt  = week_ago.strftime('%d%%2F%m%%2F%Y')   # 10%2F02%2F2026
+            month_ago = today - datetime.timedelta(days=30)
+            from_dt  = month_ago.strftime('%d%%2F%m%%2F%Y')
             to_dt    = today.strftime('%d%%2F%m%%2F%Y')
             r = safe_get(
                 f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
@@ -943,15 +1005,44 @@ def get_announcements():
                 try:
                     payload = r.json()
                     items = payload if isinstance(payload, list) else payload.get('Table', [])
-                    print(f"  BSE AnnSubCat: {len(items)} items")
-                    parsed = parse_items(items, symbol, base, 'BSE')
-                    all_ann.extend(parsed)
-                    got = bool(parsed)
+                    print(f"  BSE AnnSubCat (30d): {len(items)} items")
+                    if items:
+                        parsed = parse_items(items, symbol, base, 'BSE')
+                        all_ann.extend(parsed)
+                        got = bool(parsed)
+                        for a in parsed[:3]:
+                            print(f"    [{a['date'][:10]}] {a['title'][:60]}")
                 except Exception as e:
                     print(f"  BSE AnnSubCat parse error: {e}")
 
-        # ── BSE Msource search: works with NSE symbol directly (no scrip code) ─
-        if not got:
+        # ── BSE AnnGetData with date range (strSearch=P needs from+to dates) ─
+        if not got and bse_code:
+            today    = datetime.date.today()
+            month_ago = today - datetime.timedelta(days=30)
+            from_str = month_ago.strftime('%d/%m/%Y')
+            to_str   = today.strftime('%d/%m/%Y')
+            r = safe_get(
+                f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
+                f"?strCat=-1&strPrevDate={from_str}&strScrip={bse_code}"
+                f"&strSearch=P&strToDate={to_str}&strType=C",
+                BSE_HDR, timeout=15)
+            if r:
+                try:
+                    payload = r.json()
+                    items = payload if isinstance(payload, list) else \
+                            payload.get('Table', payload.get('Data', []))
+                    print(f"  BSE AnnGetData (30d): {len(items)} items")
+                    if items:
+                        parsed = parse_items(items, symbol, base, 'BSE')
+                        all_ann.extend(parsed)
+                        got = bool(parsed)
+                        for a in parsed[:3]:
+                            print(f"    [{a['date'][:10]}] {a['title'][:60]}")
+                except Exception as e:
+                    print(f"  BSE AnnGetData parse error: {e}")
+
+        # ── BSE Msource: resolve missing scrip code, then retry ───────────────
+        if not got and not bse_code:
             r = safe_get(
                 f"https://api.bseindia.com/Msource/1D/getQouteSearch.aspx?Type=EQ&text={base}&flag=site",
                 {**BSE_HDR, 'Accept': 'application/json, text/plain, */*'}, timeout=8)
@@ -960,32 +1051,42 @@ def get_announcements():
                     hits = r.json()
                     if isinstance(hits, list) and hits:
                         code = str(hits[0].get('scripcode',''))
-                        if code and code not in bse_codes.values():
+                        if code:
                             bse_codes[base] = code
                             bse_code = code
                             print(f"  Msource found code: {code}")
+                            # Retry BSE with newly found code
+                            today    = datetime.date.today()
+                            month_ago = today - datetime.timedelta(days=30)
+                            from_dt  = month_ago.strftime('%d%%2F%m%%2F%Y')
+                            to_dt    = today.strftime('%d%%2F%m%%2F%Y')
+                            r2 = safe_get(
+                                f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
+                                f"?pageno=1&strCat=-1&strPrevDate={from_dt}&strScrip={bse_code}"
+                                f"&strSearch=C&strToDate={to_dt}&strType=C&subcategory=-1",
+                                BSE_HDR, timeout=15)
+                            if r2:
+                                payload = r2.json()
+                                items = payload if isinstance(payload, list) else payload.get('Table', [])
+                                if items:
+                                    parsed = parse_items(items, symbol, base, 'BSE')
+                                    all_ann.extend(parsed)
+                                    got = bool(parsed)
                 except Exception:
                     pass
 
-        # ── NSE fallback ──────────────────────────────────────────────────────
+        # ── NSE fallback (with session auto-refresh on timeout) ───────────────
         if not got:
-            for url in [
-                f"https://www.nseindia.com/api/corporate-announcements?symbol={base}",
-                f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={base}",
-            ]:
-                r = safe_get(url, NSE_HDR, sess=nse_sess, timeout=12)
-                if r:
-                    try:
-                        d = r.json()
-                        items = d if isinstance(d, list) else d.get('data', d.get('announcements', []))
-                        if items:
-                            print(f"  NSE: {len(items)} items")
-                            parsed = parse_items(items[:15], symbol, base, 'NSE')
-                            all_ann.extend(parsed)
-                            got = bool(parsed)
-                            break
-                    except Exception as e:
-                        print(f"  NSE parse error: {e}")
+            items = nse_fetch_announcements(base, nse_sess)
+            if items is None:
+                # Session may have expired — refresh and retry once
+                print(f"  NSE session refresh for {base}")
+                nse_sess = make_nse_session()
+                items = nse_fetch_announcements(base, nse_sess)
+            if items:
+                parsed = parse_items(items[:20], symbol, base, 'NSE')
+                all_ann.extend(parsed)
+                got = bool(parsed)
 
         if not got:
             print(f"  !! No announcements found for {base}")
