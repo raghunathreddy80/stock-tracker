@@ -134,6 +134,7 @@ def _read_file(filename):
 
 _LOGIN_HTML        = _read_file('login.html')
 _STOCK_TRACKER_HTML = _read_file('stock_tracker.html')
+_SUBSTACK_HTML     = _read_file('substack_post.html')
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -168,6 +169,10 @@ def login_page():
 @app.route('/stock_tracker.html')
 def stock_tracker_page():
     return Response(_STOCK_TRACKER_HTML, mimetype='text/html')
+
+@app.route('/substack_post.html')
+def substack_post_page():
+    return Response(_SUBSTACK_HTML, mimetype='text/html')
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -572,78 +577,6 @@ def get_portfolio_summary_api():
 def health():
     return jsonify({'status': 'ok'})
 
-
-
-
-ADMIN_USERNAME = 'raghunathreddy80'
-
-@app.route('/api/admin/users', methods=['GET'])
-@login_required
-def admin_list_users():
-    """Admin only: list all registered users with stats"""
-    if current_user.username != ADMIN_USERNAME:
-        return jsonify({'error': 'Forbidden'}), 403
-    try:
-        import psycopg2
-        conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        c = conn.cursor()
-        c.execute("""
-            SELECT u.id, u.username, u.created_at,
-                   COUNT(DISTINCT w.id) AS watchlist_count,
-                   COUNT(DISTINCT p.id) AS portfolio_count
-            FROM users u
-            LEFT JOIN watchlists w ON w.user_id = u.id
-            LEFT JOIN portfolio p ON p.user_id = u.id
-            GROUP BY u.id, u.username, u.created_at
-            ORDER BY u.created_at ASC
-        """)
-        rows = c.fetchall()
-        conn.close()
-        users = [
-            {
-                'id': r[0],
-                'username': r[1],
-                'created_at': r[2].isoformat() if r[2] else None,
-                'watchlist_count': r[3],
-                'portfolio_count': r[4]
-            }
-            for r in rows
-        ]
-        return jsonify(users)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/admin/users/remove', methods=['POST'])
-@login_required
-def admin_remove_user():
-    """Admin only: remove a user and all their data"""
-    if current_user.username != ADMIN_USERNAME:
-        return jsonify({'success': False, 'message': 'Forbidden'}), 403
-    data = request.get_json()
-    username = (data.get('username') or '').strip()
-    if not username:
-        return jsonify({'success': False, 'message': 'Username required'}), 400
-    if username == ADMIN_USERNAME:
-        return jsonify({'success': False, 'message': 'Cannot remove admin account'}), 400
-    try:
-        import psycopg2
-        conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE username = %s", (username,))
-        row = c.fetchone()
-        if not row:
-            conn.close()
-            return jsonify({'success': False, 'message': 'User not found'}), 404
-        uid = row[0]
-        c.execute("DELETE FROM watchlists WHERE user_id = %s", (uid,))
-        c.execute("DELETE FROM portfolio WHERE user_id = %s", (uid,))
-        c.execute("DELETE FROM users WHERE id = %s", (uid,))
-        conn.commit()
-        conn.close()
-        return jsonify({'success': True, 'message': f'User {username} removed'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/fix-watchlist-dupes')
 def fix_watchlist_dupes():
