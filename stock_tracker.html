@@ -2234,14 +2234,15 @@
                     statusMsg += ` (${failCount} documents couldn't be processed)`;
                 }
                 statusMsg += ` Ask me anything about the company!`;
-                
-                ddAddSystemMessage(statusMsg);
 
                 // Mark session as active — controls stay locked, tab switches won't reset state
                 ddSessionActive = true;
 
-                // Hide progress bar after a short delay
-                setTimeout(() => setDDProgress(0, 0), 2000);
+                // Hide progress bar first, then show completion message
+                setTimeout(() => {
+                    setDDProgress(0, 0);
+                    ddAddSystemMessage(statusMsg);
+                }, 1500);
                 
             } catch (error) {
                 console.error('Fetch docs error:', error);
