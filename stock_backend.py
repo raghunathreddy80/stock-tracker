@@ -3752,160 +3752,149 @@ def get_slb_data():
         #   cols[7]  = Best Offer Qty   (or Best Ask Qty)
         #   cols[8]  = Best Offer Price
         # ============================================================
-        def _playwright_scrape(symbols_to_find):
+        def _nse_api_scrape(symbols_to_find):
             """
-            Use Playwright (bundled Chromium) to scrape the JS-rendered SLB table.
-            Playwright installs its own Chromium via pip — no system Chrome needed.
-            Works on Render, Railway, and any standard Python host.
-            Returns dict: symbol -> list of contract dicts.
-            Returns None if Playwright is unavailable or scrape fails.
+            Fetch SLB data by calling NSE's internal API directly.
+            Mimics what the browser does when you select a series from the dropdown:
+              GET /api/slbMarketWatch?series=03  (Mar)
+              GET /api/slbMarketWatch?series=X3  (Mar extended)
+              GET /api/slbMarketWatch?series=04  (Apr)  etc.
+            Uses a fresh NSE session with proper cookies each time.
+            Returns dict: symbol -> list of contract dicts, or None on total failure.
             """
-            try:
-                from playwright.sync_api import sync_playwright
-            except ImportError:
-                print('  [SLB Playwright] playwright not installed — skipping')
+            import datetime as _dt2
+
+            # Current and next 3 months series numbers
+            now = _dt2.date.today()
+            series_to_try = []
+            for delta in range(4):   # current month + 3 ahead
+                m = (now.month - 1 + delta) % 12 + 1
+                s  = f'{m:02d}'
+                xs = 'X' + ('A' if m == 10 else 'B' if m == 11 else 'D' if m == 12 else f'{m:01d}')
+                series_to_try.append(s)
+                series_to_try.append(xs)
+
+            # If caller specified months, also add those explicitly
+            MONTH_TO_NUM = {
+                'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+                'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12
+            }
+            for m in months:
+                abbr = m[:3].upper()
+                if abbr in MONTH_TO_NUM:
+                    mn = MONTH_TO_NUM[abbr]
+                    s  = f'{mn:02d}'
+                    xs = 'X' + ('A' if mn==10 else 'B' if mn==11 else 'D' if mn==12 else f'{mn:01d}')
+                    if s not in series_to_try:
+                        series_to_try += [s, xs]
+
+            UA2 = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/122.0.0.0 Safari/537.36')
+
+            def _fresh_nse_session():
+                """Open a fresh requests session and get NSE cookies."""
+                s = req.Session()
+                s.headers.update({
+                    'User-Agent': UA2,
+                    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                })
+                try:
+                    r = s.get('https://www.nseindia.com', timeout=15, proxies=proxies)
+                    print(f'  [SLB API] NSE homepage: {r.status_code}, cookies: {list(s.cookies.keys())}')
+                    # Also hit the SLB page to get any additional cookies
+                    s.headers.update({
+                        'Referer': 'https://www.nseindia.com/',
+                        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+                    })
+                    s.get('https://www.nseindia.com/market-data/securities-lending-borrowing',
+                          timeout=15, proxies=proxies)
+                except Exception as e:
+                    print(f'  [SLB API] session warmup error: {e}')
+                return s
+
+            nse_s = _fresh_nse_session()
+            api_headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.nseindia.com/market-data/securities-lending-borrowing',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Connection': 'keep-alive',
+            }
+
+            all_items = []
+            for series in series_to_try:
+                url = f'https://www.nseindia.com/api/slbMarketWatch?series={series}'
+                try:
+                    r = nse_s.get(url, headers=api_headers, timeout=15, proxies=proxies)
+                    print(f'  [SLB API] {r.status_code} series={series} ({len(r.text)} bytes)')
+                    if r.status_code == 401:
+                        # Session expired — refresh and retry once
+                        print('  [SLB API] 401 — refreshing session and retrying')
+                        nse_s = _fresh_nse_session()
+                        r = nse_s.get(url, headers=api_headers, timeout=15, proxies=proxies)
+                        print(f'  [SLB API] retry: {r.status_code}')
+                    if not r.ok or len(r.text.strip()) < 5:
+                        continue
+                    data = r.json()
+                    # NSE returns {"data": [...]} or just [...]
+                    items = data if isinstance(data, list) else data.get('data', [])
+                    print(f'  [SLB API] series={series}: {len(items)} items')
+                    all_items.extend(items)
+                except Exception as e:
+                    print(f'  [SLB API] series={series} error: {e}')
+
+            if not all_items:
+                print('  [SLB API] no data from any series')
                 return None
 
-            def _safe_int(s):
-                try:
-                    return int(str(s).replace(',', ''))
-                except Exception:
-                    return 0
+            # Parse items into per-symbol contract dicts
+            def _fv2(item, *keys):
+                for k in keys:
+                    v = item.get(k)
+                    if v is not None and str(v).strip() not in ('', '-', 'NA', '--'):
+                        try: return float(str(v).replace(',', ''))
+                        except: return v
+                return 0
 
-            def _safe_float(s):
-                try:
-                    return float(str(s).replace(',', ''))
-                except Exception:
-                    return 0.0
+            results_map = {}
+            for item in all_items:
+                sym = str(item.get('symbol') or item.get('Symbol') or '').upper().strip()
+                if sym not in symbols_to_find:
+                    continue
+                expiry = str(
+                    item.get('expiryDate') or item.get('expiry') or
+                    item.get('ExpiryDate') or item.get('EXPIRY_DT') or ''
+                ).upper().strip()
+                bid_qty   = _fv2(item, 'bestBidQty',   'bidQty',   'lendQty')
+                bid_price = _fv2(item, 'bestBidPrice',  'bidPrice', 'lendPrice', 'fee')
+                ask_qty   = _fv2(item, 'bestAskQty',    'askQty',   'borrowQty')
+                ask_price = _fv2(item, 'bestAskPrice',  'askPrice', 'borrowPrice')
+                ltp       = _fv2(item, 'ltp', 'LTP', 'lastPrice')
+                has_bid   = float(bid_qty or 0) > 0
+                has_ask   = float(ask_qty or 0) > 0
+                if has_bid:
+                    print(f'  [SLB API] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
+                if has_ask:
+                    print(f'  [SLB API]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
+                if sym not in results_map:
+                    results_map[sym] = []
+                results_map[sym].append({
+                    'symbol': sym, 'expiry': expiry, 'series': 'B',
+                    'bidQty': bid_qty, 'bidPrice': bid_price,
+                    'askQty': ask_qty, 'askPrice': ask_price,
+                    'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask,
+                    'raw': item,
+                })
+            print(f'  [SLB API] matched {len(results_map)} symbols: {list(results_map.keys())}')
+            return results_map
 
-            try:
-                with sync_playwright() as pw:
-                    browser = pw.chromium.launch(
-                        headless=True,
-                        args=[
-                            '--no-sandbox',
-                            '--disable-dev-shm-usage',
-                            '--disable-blink-features=AutomationControlled',
-                            '--disable-gpu',
-                        ]
-                    )
-                    context = browser.new_context(
-                        user_agent=UA,
-                        viewport={'width': 1920, 'height': 1080},
-                        extra_http_headers={
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-                        }
-                    )
-                    # Hide webdriver flag
-                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-                    page = context.new_page()
-
-                    # ── Step 1: Visit homepage to get NSE cookies ────
-                    print('  [SLB Playwright] warming up NSE session...')
-                    try:
-                        page.goto('https://www.nseindia.com', wait_until='domcontentloaded', timeout=20000)
-                        page.wait_for_timeout(3000)
-                    except Exception as warm_err:
-                        print(f'  [SLB Playwright] homepage warmup: {warm_err}')
-
-                    # ── Step 2: Navigate to SLB page ─────────────────
-                    url = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
-                    print(f'  [SLB Playwright] loading {url}')
-
-                    try:
-                        page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                    except Exception as nav_err:
-                        print(f'  [SLB Playwright] navigation error: {nav_err}')
-
-                    # ── Step 3: Wait for Angular/JS to render table ──
-                    # NSE uses Angular — table renders after XHR calls finish.
-                    # Wait up to 25s for any table row to appear.
-                    try:
-                        page.wait_for_selector('table tbody tr', timeout=25000)
-                        print('  [SLB Playwright] table rows appeared')
-                    except Exception:
-                        print('  [SLB Playwright] timeout waiting for table rows')
-                        # Log page title and URL to diagnose blocking
-                        try:
-                            print(f'  [SLB Playwright] page title: {page.title()}')
-                            print(f'  [SLB Playwright] page url:   {page.url}')
-                            # Check if we got a captcha or access denied
-                            body_text = page.inner_text('body')[:300] if page.query_selector('body') else ''
-                            print(f'  [SLB Playwright] body preview: {body_text}')
-                        except Exception:
-                            pass
-
-                    # Extra buffer for all rows to fully render
-                    page.wait_for_timeout(4000)
-
-                    rows = page.query_selector_all('table tbody tr')
-                    print(f'  [SLB Playwright] found {len(rows)} table rows')
-
-                    results_map = {}
-                    for row in rows:
-                        try:
-                            text = (row.inner_text() or '').strip()
-                            if not text:
-                                continue
-                            cols = text.split()
-                            if len(cols) < 7:
-                                continue
-
-                            sym    = cols[0].upper()
-                            series = cols[1].upper() if len(cols) > 1 else 'B'
-                            expiry = cols[2].upper() if len(cols) > 2 else ''
-
-                            if sym not in symbols_to_find:
-                                continue
-
-                            # Column mapping (from slb.py):
-                            #  cols[3]=LTP  cols[5]=bid_qty  cols[6]=bid_price
-                            #  cols[7]=ask_qty  cols[8]=ask_price
-                            ltp       = _safe_float(cols[3]) if len(cols) > 3 else 0.0
-                            bid_qty   = _safe_int(cols[5])   if len(cols) > 5 else 0
-                            bid_price = _safe_float(cols[6]) if len(cols) > 6 else 0.0
-                            ask_qty   = _safe_int(cols[7])   if len(cols) > 7 else 0
-                            ask_price = _safe_float(cols[8]) if len(cols) > 8 else 0.0
-
-                            has_bid = bid_qty > 0
-                            has_ask = ask_qty > 0
-
-                            if has_bid:
-                                print(f'  [SLB Playwright] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
-                            if has_ask:
-                                print(f'  [SLB Playwright]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
-
-                            if sym not in results_map:
-                                results_map[sym] = []
-                            results_map[sym].append({
-                                'symbol':   sym,
-                                'expiry':   expiry,
-                                'series':   series,
-                                'bidQty':   bid_qty,
-                                'bidPrice': bid_price,
-                                'askQty':   ask_qty,
-                                'askPrice': ask_price,
-                                'ltp':      ltp,
-                                'hasBid':   has_bid,
-                                'hasAsk':   has_ask,
-                                'raw':      {'row_text': text},
-                            })
-                        except Exception as row_err:
-                            print(f'  [SLB Playwright] row parse error: {row_err}')
-                            continue
-
-                    browser.close()
-                    print(f'  [SLB Playwright] scraped {len(results_map)} matching symbols: {list(results_map.keys())}')
-                    return results_map
-
-            except Exception as e:
-                print(f'  [SLB Playwright] failed: {e}')
-                return None
-
-        # ── Run Strategy 0: Playwright ──────────────────────────────
-        selenium_results = _playwright_scrape(set(symbols))
+        # ── Run Strategy 0: NSE API with fresh session ──────────────
+        selenium_results = _nse_api_scrape(set(symbols))
 
         # If Selenium succeeded and found ALL requested symbols, return immediately
         if selenium_results is not None:
