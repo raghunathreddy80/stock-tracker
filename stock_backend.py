@@ -3704,14 +3704,183 @@ def get_slb_data():
             pass
 
         # ============================================================
-        # STRATEGY 1: HTML scrape + parse td[@headers] XPath
-        # NSE renders cells like:
-        #   <td headers="bestBid qty2 CANBK">-</td>
-        #   <td headers="bestOffers price2 CANBK">0.12</td>
-        #   <td headers="bestOffers qty2 CANBK">1</td>
-        #   <td headers="ltp CANBK">153.91</td>
-        #   <td headers="expiryDate CANBK">27-Mar-2026</td>
-        # The last token in 'headers' is always the SYMBOL.
+        # STRATEGY 0: Selenium (headless Chrome) — JS-rendered page
+        # NSE's SLB page is fully JavaScript-rendered, so plain HTTP
+        # requests only get an empty HTML shell. Selenium runs a real
+        # browser, waits for the table to populate, then returns the
+        # full rendered HTML for the same td[@headers] parser below.
+        # ============================================================
+        def _scrape_selenium_for_series(series_param=None):
+            """Use headless Chrome via Selenium to render the NSE SLB page."""
+            try:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.options import Options
+                from selenium.webdriver.chrome.service import Service
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+                from selenium.common.exceptions import TimeoutException
+            except ImportError:
+                print('  [SLB Selenium] selenium not installed — skipping')
+                return {}
+
+            url = 'https://www.nseindia.com/market-data/securities-lending-and-borrowing'
+            if series_param:
+                url += f'?series={series_param}'
+
+            opts = Options()
+            opts.add_argument('--headless')
+            opts.add_argument('--no-sandbox')
+            opts.add_argument('--disable-dev-shm-usage')
+            opts.add_argument('--disable-gpu')
+            opts.add_argument('--window-size=1920,1080')
+            opts.add_argument('--disable-blink-features=AutomationControlled')
+            opts.add_experimental_option('excludeSwitches', ['enable-automation'])
+            opts.add_experimental_option('useAutomationExtension', False)
+            opts.add_argument(
+                'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/122.0.0.0 Safari/537.36'
+            )
+            if proxy_host and proxy_port:
+                opts.add_argument(f'--proxy-server={proxy_host}:{proxy_port}')
+
+            driver = None
+            try:
+                # Try to find chromedriver automatically
+                try:
+                    from selenium.webdriver.chrome.service import Service as ChromeService
+                    from shutil import which
+                    chrome_bin = which('chromium-browser') or which('chromium') or which('google-chrome')
+                    if chrome_bin:
+                        opts.binary_location = chrome_bin
+                    service = ChromeService()
+                except Exception:
+                    service = Service()
+
+                driver = webdriver.Chrome(service=service, options=opts)
+                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+                print(f'  [SLB Selenium] loading {url}')
+                driver.get(url)
+
+                # Wait up to 20s for at least one data cell with a 'headers' attr
+                # that contains a known symbol keyword
+                try:
+                    WebDriverWait(driver, 20).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, 'td[headers]'))
+                    )
+                except TimeoutException:
+                    # Try waiting for any table row as fallback
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, 'table tbody tr'))
+                        )
+                    except TimeoutException:
+                        print('  [SLB Selenium] timed out waiting for table data')
+                        return {}
+
+                # Extra small sleep to let all rows render
+                import time as _time
+                _time.sleep(2)
+
+                html = driver.page_source
+                print(f'  [SLB Selenium] got {len(html)} bytes of rendered HTML')
+                return html  # return raw HTML string; caller will parse it
+
+            except Exception as e:
+                print(f'  [SLB Selenium] error: {e}')
+                return {}
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+        def _parse_slb_html(html, symbols_set):
+            """Parse rendered SLB HTML (with td[@headers]) into a results_map dict."""
+            if not html or not isinstance(html, str):
+                return {}
+            scraped = {}
+
+            if HAS_LXML:
+                try:
+                    from lxml import etree as _etree2
+                    parser = _etree2.HTMLParser()
+                    tree = _etree2.fromstring(html.encode(), parser)
+                    for td in tree.xpath('//td[@headers]'):
+                        hdr   = (td.get('headers') or '').strip()
+                        parts = hdr.split()
+                        if len(parts) < 2:
+                            continue
+                        sym = parts[-1].upper()
+                        col = ' '.join(parts[:-1]).lower()
+                        val = (td.text_content() if hasattr(td, 'text_content') else td.text or '').strip()
+                        if sym not in scraped:
+                            scraped[sym] = {}
+                        scraped[sym][col] = val
+                    print(f'  [SLB parse lxml] {len(scraped)} symbols: {list(scraped.keys())[:10]}')
+                except Exception as xe:
+                    print(f'  [SLB parse lxml] error: {xe}')
+
+            if not scraped:
+                import re as _re2
+                pat = _re2.compile(r'<td[^>]+headers="([^"]+)"[^>]*>(.*?)</td>', _re2.IGNORECASE | _re2.DOTALL)
+                for mo in pat.finditer(html):
+                    hdr   = mo.group(1).strip()
+                    val   = _re.sub(r'<[^>]+>', '', mo.group(2)).strip()
+                    parts = hdr.split()
+                    if len(parts) < 2:
+                        continue
+                    sym = parts[-1].upper()
+                    col = ' '.join(parts[:-1]).lower()
+                    if sym not in scraped:
+                        scraped[sym] = {}
+                    scraped[sym][col] = val
+                print(f'  [SLB parse regex] {len(scraped)} symbols: {list(scraped.keys())[:10]}')
+
+            def _cv(cols, *col_keys):
+                for ck in col_keys:
+                    v = cols.get(ck, '')
+                    if v and v not in ('-', '--', 'NA', '–'):
+                        try:
+                            return float(str(v).replace(',', ''))
+                        except Exception:
+                            pass
+                return 0
+
+            results_map = {}
+            for sym, cols in scraped.items():
+                if sym not in symbols_set:
+                    continue
+                bid_qty   = _cv(cols, 'bestbid qty2',      'bestbid qty',      'bid qty2',     'bid qty')
+                bid_price = _cv(cols, 'bestbid price2',    'bestbid price',    'bid price2',   'bid price')
+                ask_qty   = _cv(cols, 'bestoffers qty2',   'bestoffers qty',   'offer qty2',   'offer qty')
+                ask_price = _cv(cols, 'bestoffers price2', 'bestoffers price', 'offer price2', 'offer price')
+                ltp       = _cv(cols, 'ltp', 'last price', 'ltp2')
+                expiry    = cols.get('expirydate', cols.get('expiry', '')).upper().strip()
+                has_bid   = bid_qty > 0
+                has_ask   = ask_qty > 0
+                if has_bid:
+                    print(f'  [SLB] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
+                if has_ask:
+                    print(f'  [SLB]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
+                if sym not in results_map:
+                    results_map[sym] = []
+                results_map[sym].append({
+                    'symbol': sym, 'expiry': expiry, 'series': 'B',
+                    'bidQty': bid_qty, 'bidPrice': bid_price,
+                    'askQty': ask_qty, 'askPrice': ask_price,
+                    'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask,
+                    'raw': cols,
+                })
+            return results_map
+
+        # ============================================================
+        # STRATEGY 1: Plain HTTP HTML scrape + parse td[@headers] XPath
+        # (Works only if NSE ever serves SSR content; currently JS-only
+        #  so this usually returns 0 symbols — kept as a cheap first try)
         # ============================================================
         def _scrape_html_for_series(series_param=None):
             url = 'https://www.nseindia.com/market-data/securities-lending-and-borrowing'
@@ -3867,14 +4036,36 @@ def get_slb_data():
             return contracts
 
         # ── Run all strategies ──────────────────────────────────────
+        symbols_set = set(symbols)
         html_results = {}
         series_to_try = req_series if req_series else ['']
-        for snum in series_to_try:
-            partial = _scrape_html_for_series(snum if snum else None)
+
+        # Strategy 0: Selenium (preferred — handles JS-rendered content)
+        selenium_html = _scrape_selenium_for_series(series_to_try[0] if series_to_try[0] else None)
+        if isinstance(selenium_html, str) and len(selenium_html) > 2000:
+            partial = _parse_slb_html(selenium_html, symbols_set)
             for sym, contracts in partial.items():
                 if sym not in html_results:
                     html_results[sym] = []
                 html_results[sym].extend(contracts)
+            # Fetch remaining series if needed
+            for snum in series_to_try[1:]:
+                extra_html = _scrape_selenium_for_series(snum if snum else None)
+                if isinstance(extra_html, str) and len(extra_html) > 2000:
+                    extra = _parse_slb_html(extra_html, symbols_set)
+                    for sym, contracts in extra.items():
+                        if sym not in html_results:
+                            html_results[sym] = []
+                        html_results[sym].extend(contracts)
+
+        # Strategy 1: Plain HTTP HTML scrape (fallback if Selenium unavailable)
+        if not html_results:
+            for snum in series_to_try:
+                partial = _scrape_html_for_series(snum if snum else None)
+                for sym, contracts in partial.items():
+                    if sym not in html_results:
+                        html_results[sym] = []
+                    html_results[sym].extend(contracts)
 
         json_items = []
         missing = [s for s in symbols if s not in html_results or not html_results[s]]
