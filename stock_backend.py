@@ -3712,6 +3712,7 @@ def get_slb_data():
                             '--disable-dev-shm-usage',
                             '--disable-gpu',
                             '--disable-blink-features=AutomationControlled',
+                            '--disable-http2',  # NSE blocks HTTP2 from headless browsers
                         ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
                     )
                     ctx = browser.new_context(
@@ -3726,17 +3727,33 @@ def get_slb_data():
                     )
                     ctx.add_init_script("""
                         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN','en']});
                         window.chrome = {runtime: {}};
                     """)
                     page = ctx.new_page()
 
-                    # ── Step 1: Load the page once ──────────────────
-                    print(f'  [SLB] Opening NSE SLB page...')
-                    page.goto(
-                        'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
-                        timeout=40000,
-                        wait_until='domcontentloaded'
-                    )
+                    # ── Step 1: Homepage first to get NSE session cookies ──
+                    print('  [SLB] Loading NSE homepage for cookies...')
+                    try:
+                        page.goto('https://www.nseindia.com', timeout=30000, wait_until='domcontentloaded')
+                        page.wait_for_timeout(3000)
+                        print('  [SLB] Homepage OK')
+                    except Exception as home_err:
+                        print(f'  [SLB] Homepage warn (continuing): {home_err}')
+
+                    # ── Step 2: Navigate to SLB page ────────────────
+                    print('  [SLB] Opening NSE SLB page...')
+                    try:
+                        page.goto(
+                            'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+                            timeout=40000,
+                            wait_until='domcontentloaded'
+                        )
+                    except Exception as nav_err:
+                        print(f'  [SLB] SLB page nav error: {nav_err}')
+                        browser.close()
+                        return {}
 
                     # Wait for the dropdown to appear
                     DROPDOWN_XPATH = "//span[text()='Filter by']/following::select[1]"
