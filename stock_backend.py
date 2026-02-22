@@ -3677,8 +3677,7 @@ def get_slb_data():
             return default
 
         for symbol in symbols:
-            print(f"
-  [SLB] {symbol}")
+            print(f"\n  [SLB] {symbol}")
             r = None
 
             # Try symbol-specific first, then general market endpoint
