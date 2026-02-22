@@ -1627,9 +1627,21 @@
                     </div>
                 </div>
 
+                <!-- Symbol input -->
+                <div style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:10px;padding:0.85rem 1.1rem;margin-bottom:0.75rem;">
+                    <div style="font-size:0.72rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.5rem;">&#128270; Symbols to Monitor <span style="font-weight:400;text-transform:none;">(comma separated)</span></div>
+                    <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;">
+                        <input id="slbSymbolInput" type="text" placeholder="e.g. CANBK, LAURUSLABS, IEX"
+                            style="flex:1;min-width:220px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;padding:0.45rem 0.75rem;font-size:0.83rem;color:var(--text-primary);outline:none;"
+                            onkeydown="if(event.key==='Enter') slbSaveSymbols()">
+                        <button class="btn" onclick="slbSaveSymbols()" style="padding:0.4rem 0.9rem;font-size:0.82rem;white-space:nowrap;">&#10003; Apply</button>
+                    </div>
+                    <div id="slbSymbolTags" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.55rem;"></div>
+                </div>
+
                 <!-- Month selector -->
                 <div style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:10px;padding:0.85rem 1.1rem;margin-bottom:1.1rem;">
-                    <div style="font-size:0.72rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.6rem;">📅 Select Months to Monitor</div>
+                    <div style="font-size:0.72rem;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.6rem;">&#128197; Select Months to Monitor</div>
                     <div id="slbMonthSelector" style="display:flex;flex-wrap:wrap;gap:0.5rem;"></div>
                 </div>
 
@@ -3986,35 +3998,82 @@
         // ═══════════════════════════════════════════════════════════
         // SLB — Securities Lending & Borrowing
         // ═══════════════════════════════════════════════════════════
-        const SLB_SYMBOLS = ['CANBK', 'LAURUSLABS', 'NEULANDLAB', 'SOLARA', 'IEX'];
 
-        // All available months (extend as needed)
         const SLB_ALL_MONTHS = [
             'JAN2026','FEB2026','MAR2026','APR2026','MAY2026',
             'JUN2026','JUL2026','AUG2026','SEP2026','OCT2026','NOV2026','DEC2026',
         ];
-        const SLB_STORAGE_KEY = 'slb_selected_months';
+        const SLB_MONTHS_KEY  = 'slb_selected_months';
+        const SLB_SYMBOLS_KEY = 'slb_symbols';
+        const SLB_DEFAULT_SYMBOLS = ['CANBK', 'LAURUSLABS', 'NEULANDLAB', 'SOLARA', 'IEX'];
 
         let slbInterval    = null;
         let slbInitialized = false;
         let slbAlertedKeys = new Set();
         let slbLastRaw     = null;
 
-        // ── Month persistence helpers ────────────────────────────────
+        // ── Symbol persistence ───────────────────────────────────────
+        function slbLoadSymbols() {
+            try {
+                const s = localStorage.getItem(SLB_SYMBOLS_KEY);
+                if (s) { const a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; }
+            } catch(e) {}
+            return [...SLB_DEFAULT_SYMBOLS];
+        }
+
+        function slbSaveSymbolList(arr) {
+            try { localStorage.setItem(SLB_SYMBOLS_KEY, JSON.stringify(arr)); } catch(e) {}
+        }
+
+        function slbGetSymbols() {
+            return slbLoadSymbols();
+        }
+
+        function slbSaveSymbols() {
+            const input = document.getElementById('slbSymbolInput');
+            if (!input) return;
+            const raw = input.value.trim();
+            if (!raw) return;
+            const syms = raw.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+            if (!syms.length) return;
+            slbSaveSymbolList(syms);
+            renderSymbolTags(syms);
+            fetchSLB();
+        }
+
+        function slbRemoveSymbol(sym) {
+            const syms = slbGetSymbols().filter(s => s !== sym);
+            slbSaveSymbolList(syms);
+            const input = document.getElementById('slbSymbolInput');
+            if (input) input.value = syms.join(', ');
+            renderSymbolTags(syms);
+            if (syms.length) fetchSLB();
+        }
+
+        function renderSymbolTags(syms) {
+            const container = document.getElementById('slbSymbolTags');
+            if (!container) return;
+            container.innerHTML = syms.map(s =>
+                `<span style="display:inline-flex;align-items:center;gap:0.3rem;background:rgba(99,102,241,0.15);
+                    border:1px solid rgba(99,102,241,0.4);border-radius:4px;padding:0.15rem 0.5rem;
+                    font-size:0.75rem;font-weight:600;color:#818cf8;">
+                    ${s}
+                    <span onclick="slbRemoveSymbol('${s}')" style="cursor:pointer;opacity:0.7;font-size:0.85rem;line-height:1;">&times;</span>
+                </span>`
+            ).join('');
+        }
+
+        // ── Month persistence ────────────────────────────────────────
         function slbLoadMonths() {
             try {
-                const saved = localStorage.getItem(SLB_STORAGE_KEY);
-                if (saved) {
-                    const parsed = JSON.parse(saved);
-                    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-                }
+                const saved = localStorage.getItem(SLB_MONTHS_KEY);
+                if (saved) { const p = JSON.parse(saved); if (Array.isArray(p) && p.length) return p; }
             } catch(e) {}
-            // Default: next 3 months from today
             return ['MAR2026','APR2026','MAY2026'];
         }
 
         function slbSaveMonths(months) {
-            try { localStorage.setItem(SLB_STORAGE_KEY, JSON.stringify(months)); } catch(e) {}
+            try { localStorage.setItem(SLB_MONTHS_KEY, JSON.stringify(months)); } catch(e) {}
         }
 
         function slbGetSelected() {
@@ -4031,11 +4090,12 @@
             const saved = slbLoadMonths();
             container.innerHTML = SLB_ALL_MONTHS.map(m => {
                 const checked = saved.includes(m) ? 'checked' : '';
+                const active  = !!checked;
                 return `<label style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;
-                    background:${checked ? 'rgba(99,102,241,0.18)' : 'var(--bg-secondary)'};
-                    border:1px solid ${checked ? 'rgba(99,102,241,0.55)' : 'var(--border-color)'};
+                    background:${active ? 'rgba(99,102,241,0.18)' : 'var(--bg-secondary)'};
+                    border:1px solid ${active ? 'rgba(99,102,241,0.55)' : 'var(--border-color)'};
                     border-radius:6px;padding:0.3rem 0.7rem;font-size:0.78rem;font-weight:600;
-                    color:${checked ? '#818cf8' : 'var(--text-secondary)'};
+                    color:${active ? '#818cf8' : 'var(--text-secondary)'};
                     transition:all 0.15s;" id="slbMonthLabel_${m}">
                     <input type="checkbox" id="slbMonth_${m}" value="${m}" ${checked}
                         onchange="onSlbMonthChange(this)"
@@ -4049,23 +4109,16 @@
             const m = cb.value;
             const label = document.getElementById(`slbMonthLabel_${m}`);
             if (label) {
-                if (cb.checked) {
-                    label.style.background = 'rgba(99,102,241,0.18)';
-                    label.style.borderColor = 'rgba(99,102,241,0.55)';
-                    label.style.color = '#818cf8';
-                } else {
-                    label.style.background = 'var(--bg-secondary)';
-                    label.style.borderColor = 'var(--border-color)';
-                    label.style.color = 'var(--text-secondary)';
-                }
+                label.style.background   = cb.checked ? 'rgba(99,102,241,0.18)' : 'var(--bg-secondary)';
+                label.style.borderColor  = cb.checked ? 'rgba(99,102,241,0.55)' : 'var(--border-color)';
+                label.style.color        = cb.checked ? '#818cf8' : 'var(--text-secondary)';
             }
             const selected = slbGetSelected();
             slbSaveMonths(selected);
-            // Re-fetch immediately with new month selection
             if (selected.length > 0) fetchSLB();
             else {
                 const wrap = document.getElementById('slbMonthTables');
-                if (wrap) wrap.innerHTML = `<div style="color:var(--text-secondary);font-size:0.85rem;padding:1rem;">Select at least one month above.</div>`;
+                if (wrap) wrap.innerHTML = '<div style="color:var(--text-secondary);font-size:0.85rem;padding:1rem;">Select at least one month above.</div>';
             }
         }
 
@@ -4073,6 +4126,10 @@
         function initSLBTab() {
             if (!slbInitialized) {
                 slbInitialized = true;
+                const syms = slbLoadSymbols();
+                const inp = document.getElementById('slbSymbolInput');
+                if (inp) inp.value = syms.join(', ');
+                renderSymbolTags(syms);
                 renderMonthSelector();
                 fetchSLB();
                 slbInterval = setInterval(fetchSLB, 60_000);
@@ -4093,7 +4150,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
                     body: JSON.stringify({
-                        symbols:    SLB_SYMBOLS,
+                        symbols:    slbGetSymbols(),
                         months:     months,
                         proxy_host: proxyHost,
                         proxy_port: proxyPort
@@ -4124,6 +4181,7 @@
 
         // ── Render tables ────────────────────────────────────────────
         function renderSLBMonthTables(slbData, activeMonths) {
+            const SLB_SYMBOLS = slbGetSymbols();
             const wrap        = document.getElementById('slbMonthTables');
             const alertBanner = document.getElementById('slbAlertBanner');
             const alertLog    = document.getElementById('slbAlertLog');
