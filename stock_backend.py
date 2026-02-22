@@ -3699,6 +3699,10 @@ def get_slb_data():
                 except Exception:
                     return 0.0
 
+            # Set browser path to project dir so it survives Render deploys
+            import os as _os
+            _os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/src/browsers')
+
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.launch(
