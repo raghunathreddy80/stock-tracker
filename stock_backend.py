@@ -3656,12 +3656,32 @@ def get_slb_data():
             'X-Requested-With': 'XMLHttpRequest',
         }
 
+        # ── Warm up session specifically for SLB page ────────────────
+        def _warm_slb_session(s):
+            """Hit the SLB market page so NSE sets the right cookies."""
+            try:
+                s.get(
+                    'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+                    headers={
+                        'User-Agent': NSE_SLB_HDR['User-Agent'],
+                        'Accept': 'text/html,application/xhtml+xml,*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    },
+                    timeout=20, proxies=proxies
+                )
+                print(f"  [SLB] SLB page warmed, cookies: {list(s.cookies.keys())}")
+            except Exception as e:
+                print(f"  [SLB] warm-up failed: {e}")
+
         sess = get_nse_session(proxies=proxies)
+        _warm_slb_session(sess)
         results = []
 
-        def _get(url):
+        def _get(url, s=None):
+            s = s or sess
             try:
-                r = sess.get(url, headers=NSE_SLB_HDR, timeout=20, proxies=proxies)
+                r = s.get(url, headers=NSE_SLB_HDR, timeout=20, proxies=proxies)
+                print(f"    HTTP {r.status_code} ← {url}")
                 if r and r.ok and len(r.text.strip()) > 2:
                     return r
             except Exception as e:
@@ -3676,27 +3696,42 @@ def get_slb_data():
                     except: return v
             return default
 
+        # ── Known working NSE SLB endpoints (priority order) ─────────
+        SLB_URLS = [
+            "https://www.nseindia.com/api/slbMarket",
+            "https://www.nseindia.com/api/slb-securities",
+            "https://www.nseindia.com/api/slb",
+        ]
+
         for symbol in symbols:
             print(f"\n  [SLB] {symbol}")
             r = None
 
-            # Try symbol-specific first, then general market endpoint
-            for url in [
-                f"https://www.nseindia.com/api/slbMarket?symbol={symbol}",
-                f"https://www.nseindia.com/api/slb-securities?symbol={symbol}",
-                f"https://www.nseindia.com/api/slb?symbol={symbol}",
-            ]:
-                r = _get(url)
+            # Try each endpoint with symbol param
+            for base_url in SLB_URLS:
+                r = _get(f"{base_url}?symbol={symbol}")
                 if r:
-                    print(f"    OK: {url}")
+                    print(f"    OK: {base_url}")
                     break
-                else:
-                    print(f"    FAIL: {url}")
 
-            # Session expired? refresh once
+            # Also try without symbol (full market dump) if all symbol-specific failed
             if not r:
+                print(f"    Trying full market dump endpoints...")
+                for base_url in SLB_URLS:
+                    r = _get(base_url)
+                    if r:
+                        print(f"    OK (no symbol param): {base_url}")
+                        break
+
+            # Session expired? do a full refresh + re-warm + retry
+            if not r:
+                print(f"    Refreshing session...")
                 sess = get_nse_session(proxies=proxies, force_refresh=True)
-                r = _get(f"https://www.nseindia.com/api/slbMarket?symbol={symbol}")
+                _warm_slb_session(sess)
+                for base_url in SLB_URLS:
+                    r = _get(f"{base_url}?symbol={symbol}", s=sess)
+                    if r:
+                        break
 
             if not r:
                 print(f"    No response for {symbol}")
