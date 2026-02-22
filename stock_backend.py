@@ -3659,38 +3659,46 @@ def get_slb_data():
 
         # Map month names to NSE series values (matches the <option value="..."> in the dropdown)
         # Series B = regular, X-series = extended
+        # Only X-series values (red in dropdown) — M1/M2 excluded
         MONTH_TO_SERIES = {
-            'JAN': ['M1', 'X1'], 'FEB': ['M2', 'X2'], 'MAR': ['03', 'X3'],
-            'APR': ['X4'],       'MAY': ['X5'],         'JUN': ['X6'],
-            'JUL': ['X7'],       'AUG': ['X8'],         'SEP': ['X9'],
-            'OCT': ['X0'],       'NOV': ['XN'],         'DEC': ['XD'],
+            'JAN': 'X1', 'FEB': 'X2', 'MAR': 'X3',
+            'APR': 'X4', 'MAY': 'X5', 'JUN': 'X6',
+            'JUL': 'X7', 'AUG': 'X8', 'SEP': 'X9',
+            'OCT': 'X0', 'NOV': 'XN', 'DEC': 'XD',
         }
 
         # Build list of series values to select in the dropdown
         series_values = []
         for m in months:
             abbr = m[:3].upper()
-            series_values.extend(MONTH_TO_SERIES.get(abbr, []))
+            sv = MONTH_TO_SERIES.get(abbr)
+            if sv and sv not in series_values:
+                series_values.append(sv)
         if not series_values:
-            series_values = ['03']  # default to current month Series B
+            series_values = ['X3']  # default to Mar-2026
 
         print(f'[SLB] symbols={symbols} months={months} series={series_values}')
 
-        def _scrape_with_playwright(series_val):
+        def _scrape_all_series(series_values):
             """
-            Mirrors the working local script exactly:
-            1. Open NSE SLB page
-            2. Select the series from the dropdown
-            3. Read each stock's row using XPath on the rendered table
-            Returns list of contract dicts.
+            Opens browser ONCE, loops through all requested series in the
+            same page session — much faster than launching a new browser
+            per series. Mirrors the working local script logic exactly.
             """
             try:
                 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
             except ImportError:
                 print('  [SLB] Playwright not installed')
-                return []
+                return {}
 
-            results = []
+            all_contracts = {}   # symbol -> list of contracts
+
+            def to_float(s):
+                try:
+                    return float(str(s).replace(',', ''))
+                except Exception:
+                    return 0.0
+
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.launch(
@@ -3718,6 +3726,7 @@ def get_slb_data():
                     """)
                     page = ctx.new_page()
 
+                    # ── Step 1: Load the page once ──────────────────
                     print(f'  [SLB] Opening NSE SLB page...')
                     page.goto(
                         'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
@@ -3725,109 +3734,90 @@ def get_slb_data():
                         wait_until='domcontentloaded'
                     )
 
-                    # Wait for the series dropdown to appear (same as local script)
+                    # Wait for the dropdown to appear
+                    DROPDOWN_XPATH = "//span[text()='Filter by']/following::select[1]"
                     try:
-                        page.wait_for_selector(
-                            "//span[text()='Filter by']/following::select[1]",
-                            timeout=20000
-                        )
-                        print(f'  [SLB] Dropdown found, selecting series={series_val}')
+                        page.wait_for_selector(DROPDOWN_XPATH, timeout=20000)
+                        print('  [SLB] Page loaded, dropdown found')
                     except PWTimeout:
-                        print('  [SLB] Dropdown not found — page may not have loaded')
                         html_preview = page.content()
-                        print(f'  [SLB] Page preview: {html_preview[:500]}')
+                        print(f'  [SLB] Dropdown not found. Page preview: {html_preview[:600]}')
                         browser.close()
-                        return []
+                        return {}
 
-                    # Select the series value in the dropdown (mirrors local script)
-                    page.select_option(
-                        "//span[text()='Filter by']/following::select[1]",
-                        value=series_val
-                    )
-                    page.wait_for_timeout(5000)  # wait for table to refresh
+                    # ── Step 2: Loop through each series in same browser ──
+                    for sv in series_values:
+                        print(f'  [SLB] Selecting series={sv}...')
 
-                    # Wait for table rows to populate
-                    try:
-                        page.wait_for_selector('table tbody tr', timeout=15000)
-                    except PWTimeout:
-                        print('  [SLB] Table rows not found after series selection')
-
-                    # Read each stock row using XPath — same as local script
-                    for stock in symbols:
+                        # Select the series in the dropdown
                         try:
-                            # XPath mirrors the working local script exactly
-                            def get_cell(col_idx):
-                                """col_idx: 2=bid_qty, 3=bid_price, 4=offer_price, 5=offer_qty, 6=ltp"""
-                                try:
-                                    el = page.locator(
-                                        f"//a[text()='{stock}']/ancestor::tr/td[{col_idx}]"
-                                    ).first
-                                    val = el.inner_text().strip()
-                                    return val if val else '-'
-                                except Exception:
-                                    return '-'
+                            page.select_option(DROPDOWN_XPATH, value=sv)
+                        except Exception as se:
+                            print(f'  [SLB] Could not select series {sv}: {se}')
+                            continue
 
-                            bid_qty_raw   = get_cell(2)
-                            bid_price_raw = get_cell(3)
-                            ask_price_raw = get_cell(4)
-                            ask_qty_raw   = get_cell(5)
-                            ltp_raw       = get_cell(6)
+                        # Wait for table to refresh with new data
+                        page.wait_for_timeout(5000)
+                        try:
+                            page.wait_for_selector('table tbody tr', timeout=10000)
+                        except PWTimeout:
+                            print(f'  [SLB] No table rows for series {sv}')
+                            continue
 
-                            def to_float(s):
-                                try:
-                                    return float(str(s).replace(',', ''))
-                                except Exception:
-                                    return 0.0
+                        # ── Step 3: Read each stock row ──────────────
+                        for stock in symbols:
+                            try:
+                                def get_cell(col_idx, stk=stock):
+                                    """Same XPath as the working local script"""
+                                    try:
+                                        el = page.locator(
+                                            f"//a[text()='{stk}']/ancestor::tr/td[{col_idx}]"
+                                        ).first
+                                        val = el.inner_text().strip()
+                                        return val if val else '-'
+                                    except Exception:
+                                        return '-'
 
-                            bid_qty   = to_float(bid_qty_raw)
-                            bid_price = to_float(bid_price_raw)
-                            ask_qty   = to_float(ask_qty_raw)
-                            ask_price = to_float(ask_price_raw)
-                            ltp       = to_float(ltp_raw)
-                            has_bid   = bid_qty > 0
-                            has_ask   = ask_qty > 0
+                                bid_qty   = to_float(get_cell(2))
+                                bid_price = to_float(get_cell(3))
+                                ask_price = to_float(get_cell(4))
+                                ask_qty   = to_float(get_cell(5))
+                                ltp       = to_float(get_cell(6))
+                                has_bid   = bid_qty > 0
+                                has_ask   = ask_qty > 0
 
-                            print(f'  [SLB] {stock}: bid={bid_qty}@{bid_price} ask={ask_qty}@{ask_price} ltp={ltp}')
+                                print(f'  [SLB] {stock} [{sv}]: bid={bid_qty}@{bid_price} ask={ask_qty}@{ask_price} ltp={ltp}')
 
-                            results.append({
-                                'symbol':   stock,
-                                'expiry':   series_val,
-                                'series':   'B',
-                                'bidQty':   bid_qty,
-                                'bidPrice': bid_price,
-                                'askQty':   ask_qty,
-                                'askPrice': ask_price,
-                                'ltp':      ltp,
-                                'hasBid':   has_bid,
-                                'hasAsk':   has_ask,
-                            })
+                                contract = {
+                                    'symbol':   stock,
+                                    'expiry':   sv,
+                                    'series':   'B',
+                                    'bidQty':   bid_qty,
+                                    'bidPrice': bid_price,
+                                    'askQty':   ask_qty,
+                                    'askPrice': ask_price,
+                                    'ltp':      ltp,
+                                    'hasBid':   has_bid,
+                                    'hasAsk':   has_ask,
+                                }
+                                if stock not in all_contracts:
+                                    all_contracts[stock] = []
+                                all_contracts[stock].append(contract)
 
-                        except Exception as stock_err:
-                            print(f'  [SLB] {stock} error: {stock_err}')
-                            results.append({
-                                'symbol': stock, 'expiry': series_val, 'series': 'B',
-                                'bidQty': 0, 'bidPrice': 0, 'askQty': 0,
-                                'askPrice': 0, 'ltp': 0,
-                                'hasBid': False, 'hasAsk': False,
-                            })
+                            except Exception as stock_err:
+                                print(f'  [SLB] {stock} [{sv}] error: {stock_err}')
 
                     browser.close()
+                    print(f'  [SLB] Done. {sum(len(v) for v in all_contracts.values())} contracts across {len(series_values)} series')
 
             except Exception as e:
                 print(f'  [SLB] Playwright error: {e}')
                 import traceback; traceback.print_exc()
 
-            return results
+            return all_contracts
 
-        # ── Run for each requested series ─────────────────────────
-        all_contracts = {}   # symbol -> list of contracts across series
-        for sv in series_values:
-            contracts = _scrape_with_playwright(sv)
-            for c in contracts:
-                sym = c['symbol']
-                if sym not in all_contracts:
-                    all_contracts[sym] = []
-                all_contracts[sym].append(c)
+        # ── Single browser launch for all series ───────────────────
+        all_contracts = _scrape_all_series(series_values)
 
         # ── Build response ─────────────────────────────────────────
         slb_results = []
