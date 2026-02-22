@@ -3711,92 +3711,69 @@ def get_slb_data():
         # full rendered HTML for the same td[@headers] parser below.
         # ============================================================
         def _scrape_selenium_for_series(series_param=None):
-            """Use headless Chrome via Selenium to render the NSE SLB page."""
+            """Use headless Chromium via Playwright to render the NSE SLB page.
+            Playwright bundles its own Chromium — no system apt-get needed."""
             try:
-                from selenium import webdriver
-                from selenium.webdriver.chrome.options import Options
-                from selenium.webdriver.chrome.service import Service
-                from selenium.webdriver.common.by import By
-                from selenium.webdriver.support.ui import WebDriverWait
-                from selenium.webdriver.support import expected_conditions as EC
-                from selenium.common.exceptions import TimeoutException
+                from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
             except ImportError:
-                print('  [SLB Selenium] selenium not installed — skipping')
+                print('  [SLB Playwright] playwright not installed — skipping')
                 return {}
 
             url = 'https://www.nseindia.com/market-data/securities-lending-and-borrowing'
             if series_param:
                 url += f'?series={series_param}'
 
-            opts = Options()
-            opts.add_argument('--headless')
-            opts.add_argument('--no-sandbox')
-            opts.add_argument('--disable-dev-shm-usage')
-            opts.add_argument('--disable-gpu')
-            opts.add_argument('--window-size=1920,1080')
-            opts.add_argument('--disable-blink-features=AutomationControlled')
-            opts.add_experimental_option('excludeSwitches', ['enable-automation'])
-            opts.add_experimental_option('useAutomationExtension', False)
-            opts.add_argument(
-                'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/122.0.0.0 Safari/537.36'
-            )
-            if proxy_host and proxy_port:
-                opts.add_argument(f'--proxy-server={proxy_host}:{proxy_port}')
-
-            driver = None
+            print(f'  [SLB Playwright] loading {url}')
             try:
-                # Try to find chromedriver automatically
-                try:
-                    from selenium.webdriver.chrome.service import Service as ChromeService
-                    from shutil import which
-                    chrome_bin = which('chromium-browser') or which('chromium') or which('google-chrome')
-                    if chrome_bin:
-                        opts.binary_location = chrome_bin
-                    service = ChromeService()
-                except Exception:
-                    service = Service()
-
-                driver = webdriver.Chrome(service=service, options=opts)
-                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-                print(f'  [SLB Selenium] loading {url}')
-                driver.get(url)
-
-                # Wait up to 20s for at least one data cell with a 'headers' attr
-                # that contains a known symbol keyword
-                try:
-                    WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, 'td[headers]'))
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-gpu',
+                            '--disable-blink-features=AutomationControlled',
+                        ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
                     )
-                except TimeoutException:
-                    # Try waiting for any table row as fallback
+                    ctx = browser.new_context(
+                        user_agent=(
+                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                            'AppleWebKit/537.36 (KHTML, like Gecko) '
+                            'Chrome/122.0.0.0 Safari/537.36'
+                        ),
+                        viewport={'width': 1920, 'height': 1080},
+                        java_script_enabled=True,
+                    )
+                    ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    page = ctx.new_page()
+
+                    # Visit homepage first to get NSE session cookies
+                    page.goto('https://www.nseindia.com', timeout=20000)
+                    page.wait_for_timeout(2000)
+
+                    # Navigate to SLB page
+                    page.goto(url, timeout=30000)
+
+                    # Wait for JS-rendered table data
                     try:
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, 'table tbody tr'))
-                        )
-                    except TimeoutException:
-                        print('  [SLB Selenium] timed out waiting for table data')
-                        return {}
+                        page.wait_for_selector('td[headers]', timeout=25000)
+                    except PWTimeout:
+                        try:
+                            page.wait_for_selector('table tbody tr', timeout=10000)
+                        except PWTimeout:
+                            print('  [SLB Playwright] timed out waiting for table data')
+                            browser.close()
+                            return {}
 
-                # Extra small sleep to let all rows render
-                import time as _time
-                _time.sleep(2)
-
-                html = driver.page_source
-                print(f'  [SLB Selenium] got {len(html)} bytes of rendered HTML')
-                return html  # return raw HTML string; caller will parse it
+                    page.wait_for_timeout(2000)
+                    html = page.content()
+                    browser.close()
+                    print(f'  [SLB Playwright] got {len(html)} bytes of rendered HTML')
+                    return html
 
             except Exception as e:
-                print(f'  [SLB Selenium] error: {e}')
+                print(f'  [SLB Playwright] error: {e}')
                 return {}
-            finally:
-                if driver:
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
 
         def _parse_slb_html(html, symbols_set):
             """Parse rendered SLB HTML (with td[@headers]) into a results_map dict."""
