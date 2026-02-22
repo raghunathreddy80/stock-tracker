@@ -4125,6 +4125,38 @@ def get_slb_data():
                 if raw:
                     json_items.extend(_extract_items(raw))
 
+        # ── CSV pre-fetch: fetch once, build per-symbol lookup ──────
+        # Done outside the per-symbol loop to avoid N×5 redundant HTTP requests.
+        csv_rows_by_symbol = {}  # sym -> [rows]
+        try:
+            import datetime as _dtt
+            _today = _dt.date.today()
+            _days_to_try = []
+            _d = _today
+            while len(_days_to_try) < 5:
+                if _d.weekday() < 5:
+                    _days_to_try.append(_d)
+                _d -= _dtt.timedelta(days=1)
+
+            for _try_date in _days_to_try:
+                _csv_url = (f'https://archives.nseindia.com/archives/slbs/slbftp/'
+                            f'slbwatch{_try_date.strftime("%d%m%Y")}.csv')
+                try:
+                    _r_csv = sess.get(_csv_url, headers=HDR_API, timeout=15, proxies=proxies)
+                    print(f'  [SLB CSV] {_r_csv.status_code} <- {_csv_url}')
+                    if _r_csv.ok and _r_csv.text.strip():
+                        for _row in _csv.DictReader(io.StringIO(_r_csv.text)):
+                            _sym = str(_row.get('SYMBOL') or '').upper().strip()
+                            if _sym:
+                                csv_rows_by_symbol.setdefault(_sym, []).append(dict(_row))
+                        if csv_rows_by_symbol:
+                            print(f'  [SLB CSV] loaded {sum(len(v) for v in csv_rows_by_symbol.values())} rows for {len(csv_rows_by_symbol)} symbols')
+                            break  # found a working date, stop
+                except Exception as _ce:
+                    print(f'  [SLB CSV] error: {_ce}')
+        except Exception as _ce:
+            print(f'  [SLB CSV] outer error: {_ce}')
+
         # ── Build per-symbol results ────────────────────────────────
         results = []
         for symbol in symbols:
@@ -4148,35 +4180,8 @@ def get_slb_data():
                     print(f'  [SLB] {symbol}: {len(contracts)} contracts (JSON)')
                     continue
 
-            # CSV fallback — try today and last 4 trading days (handles weekends/holidays)
-            csv_items = []
-            try:
-                import datetime as _dtt
-                today = _dt.date.today()
-                days_to_try = []
-                d = today
-                while len(days_to_try) < 5:
-                    if d.weekday() < 5:  # Mon-Fri only
-                        days_to_try.append(d)
-                    d -= _dtt.timedelta(days=1)
-
-                for try_date in days_to_try:
-                    csv_url = (f'https://archives.nseindia.com/archives/slbs/slbftp/'
-                               f'slbwatch{try_date.strftime("%d%m%Y")}.csv')
-                    try:
-                        r_csv = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
-                        print(f'  [SLB CSV] {r_csv.status_code} <- {csv_url}')
-                        if r_csv.ok and r_csv.text.strip():
-                            for row in _csv.DictReader(io.StringIO(r_csv.text)):
-                                if str(row.get('SYMBOL') or '').upper().strip() == symbol:
-                                    csv_items.append(dict(row))
-                            if csv_items:
-                                break  # found data, stop looking
-                    except Exception as ce:
-                        print(f'  [SLB CSV] error: {ce}')
-            except Exception as ce:
-                print(f'  [SLB CSV] outer error: {ce}')
-
+            # CSV fallback — use pre-fetched lookup
+            csv_items = csv_rows_by_symbol.get(symbol, [])
             if csv_items:
                 contracts = _json_to_contracts(csv_items, symbol, months)
                 results.append({'symbol': symbol, 'contracts': contracts,
