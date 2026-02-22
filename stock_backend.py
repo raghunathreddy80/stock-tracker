@@ -3625,6 +3625,124 @@ def deepdive_simple():
         return jsonify({'error': str(e)}), 500
 
 
+
+# ═══════════════════════════════════════════════════════════
+# SLB - Securities Lending and Borrowing
+# ═══════════════════════════════════════════════════════════
+
+@app.route('/api/slb', methods=['POST'])
+def get_slb_data():
+    """
+    Fetch SLB order book from NSE for given symbols and contract months.
+    Filters to Series B only and returns best bid data.
+    """
+    try:
+        data       = request.get_json() or {}
+        symbols    = [s.upper().strip() for s in data.get('symbols', [])]
+        months     = data.get('months', [])      # e.g. ["MAR2026","APR2026","MAY2026"]
+        proxy_host = data.get('proxy_host', '').strip()
+        proxy_port = data.get('proxy_port', '').strip()
+        proxies    = make_proxies(proxy_host, proxy_port)
+
+        if not symbols:
+            return jsonify({'slb': []})
+
+        NSE_HDR = {
+            'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept':          'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer':         'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+        }
+
+        sess = get_nse_session(proxies=proxies)
+        results = []
+
+        for symbol in symbols:
+            try:
+                # NSE SLB API endpoint
+                url = f"https://www.nseindia.com/api/slbMarket?symbol={symbol}"
+                r = sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+
+                # If empty/blocked, refresh session and retry once
+                if not r or not r.text.strip():
+                    sess = get_nse_session(proxies=proxies, force_refresh=True)
+                    r = sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+
+                if not r or not r.ok:
+                    print(f"  SLB {symbol}: HTTP {r.status_code if r else 'no response'}")
+                    results.append({'symbol': symbol, 'error': 'No data', 'contracts': []})
+                    continue
+
+                raw = r.json()
+                print(f"  SLB {symbol}: got response, keys={list(raw.keys()) if isinstance(raw, dict) else 'list'}")
+
+                # NSE returns data under different keys depending on version
+                items = []
+                if isinstance(raw, list):
+                    items = raw
+                elif isinstance(raw, dict):
+                    items = (raw.get('data') or raw.get('slbData') or
+                             raw.get('orderBook') or raw.get('SLB') or [])
+
+                # Filter: Series B only, and only requested months
+                contracts = []
+                for item in items:
+                    series  = (item.get('series') or item.get('Series') or '').upper().strip()
+                    expiry  = (item.get('expiryDate') or item.get('expiry') or
+                               item.get('ExpiryDate') or item.get('contractExpiry') or '').upper().strip()
+                    sym     = (item.get('symbol') or item.get('Symbol') or symbol).upper()
+
+                    # Series B filter
+                    if series != 'B':
+                        continue
+
+                    # Month filter — check if any requested month appears in expiry string
+                    if months:
+                        match = any(m.upper() in expiry.upper() for m in months)
+                        if not match:
+                            continue
+
+                    best_bid_qty   = (item.get('bestBidQty')   or item.get('bidQty')   or
+                                      item.get('BestBidQty')   or item.get('BID_QTY')  or 0)
+                    best_bid_price = (item.get('bestBidPrice') or item.get('bidPrice') or
+                                      item.get('BestBidPrice') or item.get('BID_PRICE') or 0)
+                    best_ask_qty   = (item.get('bestAskQty')   or item.get('askQty')   or
+                                      item.get('BestAskQty')   or item.get('ASK_QTY')  or 0)
+                    best_ask_price = (item.get('bestAskPrice') or item.get('askPrice') or
+                                      item.get('BestAskPrice') or item.get('ASK_PRICE') or 0)
+                    ltp            = (item.get('ltp') or item.get('LTP') or
+                                      item.get('lastPrice') or 0)
+
+                    has_bid = float(best_bid_qty) > 0
+
+                    contracts.append({
+                        'symbol':        sym,
+                        'expiry':        expiry,
+                        'series':        series,
+                        'bestBidQty':    best_bid_qty,
+                        'bestBidPrice':  best_bid_price,
+                        'bestAskQty':    best_ask_qty,
+                        'bestAskPrice':  best_ask_price,
+                        'ltp':           ltp,
+                        'hasBid':        has_bid,
+                    })
+                    if has_bid:
+                        print(f"  *** SLB BID FOUND: {sym} {expiry} Bid={best_bid_qty}@{best_bid_price}")
+
+                results.append({'symbol': symbol, 'contracts': contracts, 'raw_count': len(items)})
+
+            except Exception as e:
+                print(f"  SLB {symbol} error: {e}")
+                results.append({'symbol': symbol, 'error': str(e), 'contracts': []})
+
+        return jsonify({'slb': results, 'timestamp': __import__('datetime').datetime.now().strftime('%H:%M:%S')})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'slb': []}), 500
+
+
 if __name__ == '__main__':
     print("=" * 55)
     print("  Stock Tracker Backend  –  http://localhost:5000")

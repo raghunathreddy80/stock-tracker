@@ -1452,7 +1452,8 @@
             <button class="tab" onclick="switchTab(1)">💼 Portfolio</button>
             <button class="tab" onclick="switchTab(2)">📢 Announcements</button>
             <button class="tab" onclick="switchTab(3)">🔬 Deep Dive</button>
-            <button class="tab" id="adminTab" onclick="switchTab(4)" style="display:none;">👥 Users</button>
+            <button class="tab" onclick="switchTab(4)">📋 SLB</button>
+            <button class="tab" id="adminTab" onclick="switchTab(5)" style="display:none;">👥 Users</button>
         </div>
 
         <div class="tab-content active" id="watchlist">
@@ -1819,11 +1820,10 @@
                 }
             });
 
-            // Handle admin tab (index 4) separately — it's outside .tab-content list
+            // Handle admin tab (index 5) separately — it's outside .tab-content list
             const adminPanel = document.getElementById('adminUsers');
             if (adminPanel) {
-                if (index === 4) {
-                    // Hide all regular tab contents
+                if (index === 5) {
                     contents.forEach(c => c.classList.remove('active'));
                     adminPanel.style.display = 'block';
                     loadAdminUsers();
@@ -1835,6 +1835,7 @@
             if (index === 1) updatePortfolioChart();
             if (index === 2 && !announcementsInitialized) updateAnnouncements();
             if (index === 3) switchTabDeepDive();
+            if (index === 4) initSLBTab();
         }
 
         // ── Mobile Nav ───────────────────────────────────────────────
@@ -3939,6 +3940,132 @@
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape' && _fsOpen) closeFullscreen();
     });
-    </script>
+    
+
+        // ═══════════════════════════════════════════════════════════
+        // SLB — Securities Lending & Borrowing
+        // ═══════════════════════════════════════════════════════════
+        const SLB_SYMBOLS  = ['CANBK', 'LAURUSLABS', 'NEULANDLAB', 'SOLARA', 'IEX'];
+        const SLB_MONTHS   = ['MAR2026', 'APR2026', 'MAY2026'];
+        let slbInterval    = null;
+        let slbInitialized = false;
+        let slbAlertedKeys = new Set();
+
+        function initSLBTab() {
+            if (!slbInitialized) {
+                slbInitialized = true;
+                renderSLBSymbolTags();
+                fetchSLB();
+                slbInterval = setInterval(fetchSLB, 60_000);
+            }
+        }
+
+        function renderSLBSymbolTags() {
+            const wrap = document.getElementById('slbSymbolTags');
+            if (!wrap) return;
+            wrap.innerHTML = SLB_SYMBOLS.map(s =>
+                `<span style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;padding:0.2rem 0.6rem;font-size:0.78rem;color:var(--text-primary);">${s}</span>`
+            ).join('');
+        }
+
+        async function fetchSLB() {
+            const statusEl = document.getElementById('slbStatus');
+            if (statusEl) statusEl.textContent = 'Fetching...';
+            const { host: proxyHost, port: proxyPort } = parseProxy();
+            try {
+                const resp = await fetch(`${API_URL}/slb`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ symbols: SLB_SYMBOLS, months: SLB_MONTHS,
+                                          proxy_host: proxyHost, proxy_port: proxyPort })
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                renderSLBTable(data.slb || []);
+                if (statusEl) statusEl.textContent = `Last updated: ${data.timestamp || new Date().toLocaleTimeString('en-IN')}`;
+            } catch (e) {
+                console.error('SLB fetch error:', e);
+                if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+            }
+        }
+
+        function renderSLBTable(slbData) {
+            const tbody       = document.getElementById('slbTableBody');
+            const alertBanner = document.getElementById('slbAlertBanner');
+            const alertLog    = document.getElementById('slbAlertLog');
+            if (!tbody) return;
+
+            const newBids = [];
+            const rows    = [];
+
+            slbData.forEach(result => {
+                if (!result.contracts?.length) {
+                    SLB_MONTHS.forEach(m => {
+                        rows.push(`<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                            <td style="padding:0.65rem 1rem;color:var(--text-primary);font-weight:600;">${result.symbol}</td>
+                            <td style="padding:0.65rem 1rem;color:var(--text-secondary);">${m}</td>
+                            <td colspan="5" style="padding:0.65rem 1rem;color:var(--text-secondary);font-size:0.78rem;">${result.error || 'No Series B data'}</td>
+                        </tr>`);
+                    });
+                    return;
+                }
+
+                result.contracts.forEach(c => {
+                    const hasBid = c.hasBid;
+                    const key    = `${c.symbol}|${c.expiry}|${c.bestBidQty}|${c.bestBidPrice}`;
+                    const rowBg  = hasBid ? 'rgba(16,185,129,0.07)' : 'transparent';
+                    const bidClr = hasBid ? '#10b981' : 'var(--text-secondary)';
+                    const bidWt  = hasBid ? '700' : '400';
+
+                    rows.push(`<tr style="border-bottom:1px solid rgba(255,255,255,0.05);background:${rowBg};">
+                        <td style="padding:0.65rem 1rem;color:var(--text-primary);font-weight:600;">${c.symbol}</td>
+                        <td style="padding:0.65rem 1rem;color:var(--text-secondary);">${c.expiry}</td>
+                        <td style="padding:0.65rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${c.bestBidQty || '—'}</td>
+                        <td style="padding:0.65rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${c.bestBidPrice ? '₹'+c.bestBidPrice : '—'}</td>
+                        <td style="padding:0.65rem 1rem;text-align:right;color:var(--text-secondary);">${c.bestAskQty || '—'}</td>
+                        <td style="padding:0.65rem 1rem;text-align:right;color:var(--text-secondary);">${c.bestAskPrice ? '₹'+c.bestAskPrice : '—'}</td>
+                        <td style="padding:0.65rem 1rem;text-align:center;">
+                            ${hasBid
+                                ? '<span style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid rgba(16,185,129,0.4);border-radius:4px;padding:0.2rem 0.55rem;font-size:0.73rem;font-weight:700;">🟢 BID</span>'
+                                : '<span style="color:var(--text-secondary);font-size:0.75rem;">No bid</span>'}
+                        </td>
+                    </tr>`);
+
+                    if (hasBid && !slbAlertedKeys.has(key)) {
+                        slbAlertedKeys.add(key);
+                        newBids.push(`${c.symbol} ${c.expiry}: Bid ${c.bestBidQty}@₹${c.bestBidPrice}`);
+                    }
+                });
+            });
+
+            tbody.innerHTML = rows.join('') ||
+                '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">No Series B contracts found for MAR/APR/MAY 2026</td></tr>';
+
+            // Alert banner
+            const anyActiveBid = slbData.some(r => r.contracts?.some(c => c.hasBid));
+            if (anyActiveBid) {
+                alertBanner.style.display = 'block';
+            } else {
+                alertBanner.style.display = 'none';
+            }
+
+            if (newBids.length > 0) {
+                alertBanner.textContent = '🚨 BID DETECTED: ' + newBids.join(' | ');
+                const time = new Date().toLocaleTimeString('en-IN');
+                const prev = alertLog.innerHTML === 'No bids detected yet.' ? '' : alertLog.innerHTML;
+                alertLog.innerHTML = `<div style="color:#10b981;font-weight:600;">[${time}] ${newBids.join(', ')}</div>` + prev;
+
+                if (Notification.permission === 'granted') {
+                    new Notification('SLB Bid Alert 🚨', { body: newBids.join('\n') });
+                } else if (Notification.permission !== 'denied') {
+                    Notification.requestPermission().then(p => {
+                        if (p === 'granted') new Notification('SLB Bid Alert 🚨', { body: newBids.join('\n') });
+                    });
+                }
+            }
+        }
+
+</script>
 </body>
 </html>
