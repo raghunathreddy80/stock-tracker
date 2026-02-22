@@ -3724,170 +3724,135 @@ def get_slb_data():
         #   cols[7]  = Best Offer Qty   (or Best Ask Qty)
         #   cols[8]  = Best Offer Price
         # ============================================================
-        def _selenium_scrape(symbols_to_find):
+        def _playwright_scrape(symbols_to_find):
             """
-            Use Selenium headless Chrome to scrape the JS-rendered SLB table.
-            Returns dict: symbol -> list of contract dicts (same shape as other strategies).
-            Returns None if Selenium is unavailable or scrape fails.
+            Use Playwright (bundled Chromium) to scrape the JS-rendered SLB table.
+            Playwright installs its own Chromium via pip — no system Chrome needed.
+            Works on Render, Railway, and any standard Python host.
+            Returns dict: symbol -> list of contract dicts.
+            Returns None if Playwright is unavailable or scrape fails.
             """
             try:
-                from selenium import webdriver
-                from selenium.webdriver.chrome.service import Service as ChromeService
-                from selenium.webdriver.chrome.options import Options as ChromeOptions
-                from selenium.webdriver.common.by import By
-                from selenium.webdriver.support.ui import WebDriverWait
-                from selenium.webdriver.support import expected_conditions as EC
+                from playwright.sync_api import sync_playwright
             except ImportError:
-                print('  [SLB Selenium] selenium not installed — skipping')
+                print('  [SLB Playwright] playwright not installed — skipping')
                 return None
 
-            driver = None
-            try:
-                options = ChromeOptions()
-                options.add_argument('--headless=new')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                options.add_argument('--disable-blink-features=AutomationControlled')
-                options.add_argument('--disable-gpu')
-                options.add_argument('--window-size=1920,1080')
-                options.add_argument(f'user-agent={UA}')
-                options.add_experimental_option('excludeSwitches', ['enable-automation'])
-                options.add_experimental_option('useAutomationExtension', False)
-
-                # ── Resolve Chrome binary & driver ──────────────────
-                # Priority: env vars (set in render.yaml) → common paths → webdriver-manager
-                import shutil as _shutil
-
-                chrome_bin = (
-                    os.environ.get('CHROME_BIN') or
-                    _shutil.which('chromium') or
-                    _shutil.which('chromium-browser') or
-                    _shutil.which('google-chrome') or
-                    '/usr/bin/chromium'
-                )
-                chromedriver_bin = (
-                    os.environ.get('CHROMEDRIVER_PATH') or
-                    _shutil.which('chromedriver') or
-                    '/usr/bin/chromedriver'
-                )
-
-                if os.path.exists(chrome_bin):
-                    options.binary_location = chrome_bin
-                    print(f'  [SLB Selenium] using Chrome binary: {chrome_bin}')
-                    print(f'  [SLB Selenium] using chromedriver:  {chromedriver_bin}')
-                    service = ChromeService(executable_path=chromedriver_bin)
-                else:
-                    # Local dev: fall back to webdriver-manager auto-download
-                    print(f'  [SLB Selenium] system Chrome not found, trying webdriver-manager')
-                    try:
-                        from webdriver_manager.chrome import ChromeDriverManager
-                        service = ChromeService(ChromeDriverManager().install())
-                    except Exception:
-                        service = ChromeService()   # last resort: PATH chromedriver
-
-                driver = webdriver.Chrome(service=service, options=options)
-                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-                url = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
-                print(f'  [SLB Selenium] loading {url}')
-                driver.get(url)
-
-                # Wait up to 15 s for at least one <tbody tr> to appear
+            def _safe_int(s):
                 try:
-                    WebDriverWait(driver, 15).until(
-                        EC.presence_of_element_located((By.XPATH, '//table//tbody/tr'))
-                    )
+                    return int(str(s).replace(',', ''))
                 except Exception:
-                    print('  [SLB Selenium] timeout waiting for table rows')
+                    return 0
 
-                import time as _time
-                _time.sleep(3)   # extra buffer for all rows to render
+            def _safe_float(s):
+                try:
+                    return float(str(s).replace(',', ''))
+                except Exception:
+                    return 0.0
 
-                rows = driver.find_elements(By.XPATH, '//table//tbody/tr')
-                print(f'  [SLB Selenium] found {len(rows)} table rows')
+            try:
+                with sync_playwright() as pw:
+                    browser = pw.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-blink-features=AutomationControlled',
+                            '--disable-gpu',
+                        ]
+                    )
+                    context = browser.new_context(
+                        user_agent=UA,
+                        viewport={'width': 1920, 'height': 1080},
+                        extra_http_headers={
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+                        }
+                    )
+                    # Hide webdriver flag
+                    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-                results_map = {}
-                for row in rows:
+                    page = context.new_page()
+                    url  = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
+                    print(f'  [SLB Playwright] loading {url}')
+
+                    page.goto(url, wait_until='networkidle', timeout=30000)
+
+                    # Wait for table rows to appear (up to 15s)
                     try:
-                        text = row.text.strip()
-                        if not text:
+                        page.wait_for_selector('table tbody tr', timeout=15000)
+                    except Exception:
+                        print('  [SLB Playwright] timeout waiting for table rows')
+
+                    # Extra buffer for all rows to fully render
+                    page.wait_for_timeout(3000)
+
+                    rows = page.query_selector_all('table tbody tr')
+                    print(f'  [SLB Playwright] found {len(rows)} table rows')
+
+                    results_map = {}
+                    for row in rows:
+                        try:
+                            text = (row.inner_text() or '').strip()
+                            if not text:
+                                continue
+                            cols = text.split()
+                            if len(cols) < 7:
+                                continue
+
+                            sym    = cols[0].upper()
+                            series = cols[1].upper() if len(cols) > 1 else 'B'
+                            expiry = cols[2].upper() if len(cols) > 2 else ''
+
+                            if sym not in symbols_to_find:
+                                continue
+
+                            # Column mapping (from slb.py):
+                            #  cols[3]=LTP  cols[5]=bid_qty  cols[6]=bid_price
+                            #  cols[7]=ask_qty  cols[8]=ask_price
+                            ltp       = _safe_float(cols[3]) if len(cols) > 3 else 0.0
+                            bid_qty   = _safe_int(cols[5])   if len(cols) > 5 else 0
+                            bid_price = _safe_float(cols[6]) if len(cols) > 6 else 0.0
+                            ask_qty   = _safe_int(cols[7])   if len(cols) > 7 else 0
+                            ask_price = _safe_float(cols[8]) if len(cols) > 8 else 0.0
+
+                            has_bid = bid_qty > 0
+                            has_ask = ask_qty > 0
+
+                            if has_bid:
+                                print(f'  [SLB Playwright] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
+                            if has_ask:
+                                print(f'  [SLB Playwright]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
+
+                            if sym not in results_map:
+                                results_map[sym] = []
+                            results_map[sym].append({
+                                'symbol':   sym,
+                                'expiry':   expiry,
+                                'series':   series,
+                                'bidQty':   bid_qty,
+                                'bidPrice': bid_price,
+                                'askQty':   ask_qty,
+                                'askPrice': ask_price,
+                                'ltp':      ltp,
+                                'hasBid':   has_bid,
+                                'hasAsk':   has_ask,
+                                'raw':      {'row_text': text},
+                            })
+                        except Exception as row_err:
+                            print(f'  [SLB Playwright] row parse error: {row_err}')
                             continue
-                        cols = text.split()
-                        # Need at least 9 columns to get bid/offer data
-                        if len(cols) < 7:
-                            continue
 
-                        sym    = cols[0].upper()
-                        series = cols[1].upper() if len(cols) > 1 else 'B'
-                        expiry = cols[2].upper() if len(cols) > 2 else ''
-
-                        # Only process symbols we care about
-                        if sym not in symbols_to_find:
-                            continue
-
-                        # Extract bid/offer — indices from slb.py:
-                        #  cols[5]=bid_qty  cols[6]=bid_price
-                        #  cols[7]=ask_qty  cols[8]=ask_price  (if present)
-                        def _safe_int(s):
-                            try:
-                                return int(str(s).replace(',', ''))
-                            except Exception:
-                                return 0
-
-                        def _safe_float(s):
-                            try:
-                                return float(str(s).replace(',', ''))
-                            except Exception:
-                                return 0.0
-
-                        bid_qty   = _safe_int(cols[5])   if len(cols) > 5 else 0
-                        bid_price = _safe_float(cols[6]) if len(cols) > 6 else 0.0
-                        ask_qty   = _safe_int(cols[7])   if len(cols) > 7 else 0
-                        ask_price = _safe_float(cols[8]) if len(cols) > 8 else 0.0
-                        ltp       = _safe_float(cols[3]) if len(cols) > 3 else 0.0
-
-                        has_bid = bid_qty > 0
-                        has_ask = ask_qty > 0
-
-                        if has_bid:
-                            print(f'  [SLB Selenium] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
-                        if has_ask:
-                            print(f'  [SLB Selenium]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
-
-                        if sym not in results_map:
-                            results_map[sym] = []
-                        results_map[sym].append({
-                            'symbol':   sym,
-                            'expiry':   expiry,
-                            'series':   series,
-                            'bidQty':   bid_qty,
-                            'bidPrice': bid_price,
-                            'askQty':   ask_qty,
-                            'askPrice': ask_price,
-                            'ltp':      ltp,
-                            'hasBid':   has_bid,
-                            'hasAsk':   has_ask,
-                            'raw':      {'row_text': text},
-                        })
-                    except Exception as row_err:
-                        print(f'  [SLB Selenium] row parse error: {row_err}')
-                        continue
-
-                print(f'  [SLB Selenium] scraped {len(results_map)} matching symbols: {list(results_map.keys())}')
-                return results_map
+                    browser.close()
+                    print(f'  [SLB Playwright] scraped {len(results_map)} matching symbols: {list(results_map.keys())}')
+                    return results_map
 
             except Exception as e:
-                print(f'  [SLB Selenium] failed: {e}')
+                print(f'  [SLB Playwright] failed: {e}')
                 return None
-            finally:
-                if driver:
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
 
-        # ── Run Strategy 0: Selenium ────────────────────────────────
-        selenium_results = _selenium_scrape(set(symbols))
+        # ── Run Strategy 0: Playwright ──────────────────────────────
+        selenium_results = _playwright_scrape(set(symbols))
 
         # If Selenium succeeded and found ALL requested symbols, return immediately
         if selenium_results is not None:
