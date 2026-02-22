@@ -2066,26 +2066,11 @@
                 cb.style.cursor  = locked ? 'not-allowed' : '';
             });
 
-            // Lock/unlock the Read button itself so it can't be double-clicked
+            // Lock/unlock the Read button
             const readBtn = document.getElementById('ddReadBtn');
-            if (readBtn) readBtn.disabled = locked;
-
-            // Show/hide the "Change selection" button
-            let changeBtn = document.getElementById('ddChangeSelectionBtn');
-            if (locked) {
-                if (!changeBtn) {
-                    changeBtn = document.createElement('button');
-                    changeBtn.id = 'ddChangeSelectionBtn';
-                    changeBtn.className = 'btn';
-                    changeBtn.style.cssText = 'margin-top:0.5rem;width:100%;background:transparent;border:1px solid var(--border-color);color:var(--text-secondary);font-size:0.85rem;padding:0.5rem;';
-                    changeBtn.textContent = '✏️ Change company or documents';
-                    changeBtn.onclick = () => setDDControlsLocked(false);
-                    const readBtnEl = document.getElementById('ddReadBtn');
-                    if (readBtnEl) readBtnEl.insertAdjacentElement('afterend', changeBtn);
-                }
-                changeBtn.style.display = 'block';
-            } else if (changeBtn) {
-                changeBtn.style.display = 'none';
+            if (readBtn) {
+                readBtn.disabled = locked;
+                readBtn.style.opacity = locked ? '0.5' : '1';
             }
         }
 
@@ -2235,12 +2220,13 @@
                 }
                 statusMsg += ` Ask me anything about the company!`;
 
-                // Mark session as active — controls stay locked, tab switches won't reset state
+                // Mark session as active — tab switches won't reset state
                 ddSessionActive = true;
 
-                // Hide progress bar first, then show completion message
+                // Hide progress bar, then unlock controls and show completion message
                 setTimeout(() => {
                     setDDProgress(0, 0);
+                    setDDControlsLocked(false);
                     ddAddSystemMessage(statusMsg);
                 }, 1500);
                 
