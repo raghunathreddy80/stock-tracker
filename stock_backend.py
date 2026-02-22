@@ -3634,17 +3634,21 @@ def deepdive_simple():
 def get_slb_data():
     """
     Fetch SLB order book from NSE.
-    Strategy (in order):
-      1. /api/liveWatch?series=SLB  (NSE's current internal SLB endpoint)
-      2. /api/equity-stockIndices?index=SLB  (alternate index endpoint)
-      3. /api/quote-equity?symbol=X&section=trade_info  (per-symbol with SLB fields)
-      4. NSE all-reports CSV (end-of-day fallback)
+
+    NSE SLB series numbers: Jan=01/X1, Feb=02/X2, Mar=03/X3, Apr=04/X4,
+    May=05/X5, Jun=06/X6, Jul=07/X7, Aug=08/X8, Sep=09/X9, Oct=10/XA,
+    Nov=11/XB, Dec=12/XD
+
+    Endpoint tried (in order):
+      1. /api/slbMarketWatch?series=03   (correct current NSE endpoint)
+      2. /api/slbMarketWatch             (full dump, filter by symbol client-side)
+      3. archives CSV slbwatch{DDMMYYYY}.csv (EOD fallback)
     """
     try:
         import datetime as _dt, io, csv as _csv
         data       = request.get_json() or {}
         symbols    = [s.upper().strip() for s in data.get('symbols', [])]
-        months     = data.get('months', [])
+        months     = data.get('months', [])   # e.g. ["MAR2026","APR2026"]
         proxy_host = data.get('proxy_host', '').strip()
         proxy_port = data.get('proxy_port', '').strip()
         proxies    = make_proxies(proxy_host, proxy_port)
@@ -3653,13 +3657,8 @@ def get_slb_data():
             return jsonify({'slb': []})
 
         UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-
-        HDR_HTML = {
-            'User-Agent': UA,
-            'Accept': 'text/html,application/xhtml+xml,*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        HDR_API = {
+        HDR_HTML = {'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml,*/*', 'Accept-Language': 'en-US,en;q=0.9'}
+        HDR_API  = {
             'User-Agent': UA,
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -3668,55 +3667,99 @@ def get_slb_data():
             'Connection': 'keep-alive',
         }
 
-        # ── Warm up session ──────────────────────────────────────────
+        # NSE series numbers by month name
+        MONTH_TO_SERIES = {
+            'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
+            'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
+            'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
+        }
+        # X-series (non-foreclose contracts) map
+        MONTH_TO_XSERIES = {
+            'JAN': 'X1', 'FEB': 'X2', 'MAR': 'X3', 'APR': 'X4',
+            'MAY': 'X5', 'JUN': 'X6', 'JUL': 'X7', 'AUG': 'X8',
+            'SEP': 'X9', 'OCT': 'XA', 'NOV': 'XB', 'DEC': 'XD',
+        }
+
+        def _month_abbr(m):
+            """Extract 3-letter month from 'MAR2026' -> 'MAR'"""
+            return m[:3].upper() if m else ''
+
+        # Build list of series numbers for the requested months
+        req_series = set()
+        for m in months:
+            abbr = _month_abbr(m)
+            if abbr in MONTH_TO_SERIES:
+                req_series.add(MONTH_TO_SERIES[abbr])
+                req_series.add(MONTH_TO_XSERIES[abbr])
+
+        print(f"  [SLB] months={months} → series={req_series}")
+
+        # Warm up session
         sess = get_nse_session(proxies=proxies)
         try:
             sess.get('https://www.nseindia.com/market-data/securities-lending-and-borrowing',
                      headers=HDR_HTML, timeout=15, proxies=proxies)
-            print(f"  [SLB] cookies after warm-up: {list(sess.cookies.keys())}")
+            print(f"  [SLB] cookies: {list(sess.cookies.keys())}")
         except Exception as e:
             print(f"  [SLB] warm-up failed: {e}")
 
         def _get_json(url):
             try:
                 r = sess.get(url, headers=HDR_API, timeout=20, proxies=proxies)
-                print(f"    {r.status_code} ← {url}")
-                if r.ok and len(r.text.strip()) > 2:
-                    return r.json()
+                print(f"    {r.status_code} ← {url}  ({len(r.text)} bytes)")
+                if r.ok and len(r.text.strip()) > 5:
+                    j = r.json()
+                    # Print first 200 chars of raw for debug
+                    print(f"    raw preview: {r.text[:200]}")
+                    return j
             except Exception as e:
                 print(f"    ERR {url}: {e}")
             return None
 
+        def _extract_items(raw):
+            """Pull item list from any response shape."""
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                for k in ('data', 'slbData', 'records', 'Table', 'SLB', 'slb',
+                          'bidAsk', 'orderBook', 'response', 'marketData'):
+                    if isinstance(raw.get(k), list) and raw[k]:
+                        return raw[k]
+            return []
+
         def _fv(item, *keys, default=0):
-            """Flexible value extractor – tries many key names."""
             for k in keys:
                 v = item.get(k)
                 if v is not None and str(v).strip() not in ('', '-', 'NA', '--'):
-                    try: return float(v)
+                    try: return float(str(v).replace(',', ''))
                     except: return v
             return default
 
-        def _parse_items(items, symbol):
-            """Convert raw item list → contracts list."""
+        def _parse_items(items, symbol, active_months):
+            """Convert raw items → contracts, filtered by symbol + months."""
             contracts = []
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                series = str(item.get('series', item.get('Series', item.get('SERIES', ''))) or '').upper().strip()
-                expiry = str(
+
+                sym = str(item.get('symbol') or item.get('Symbol') or item.get('SYMBOL') or symbol).upper().strip()
+                if sym != symbol:
+                    continue
+
+                series_val = str(item.get('series') or item.get('Series') or item.get('SERIES') or '').upper().strip()
+                expiry     = str(
                     item.get('expiryDate') or item.get('expiry') or item.get('ExpiryDate') or
                     item.get('contractExpiry') or item.get('EXPIRY_DT') or item.get('maturityDate') or ''
                 ).upper().strip()
-                sym = str(item.get('symbol') or item.get('Symbol') or item.get('SYMBOL') or symbol).upper()
 
-                if series and series not in ('B', 'SLB'):
-                    continue
-                if months and expiry and not any(m.upper() in expiry for m in months):
-                    continue
+                # Filter by month if we have expiry info
+                if active_months and expiry:
+                    if not any(_month_abbr(m) in expiry for m in active_months):
+                        continue
 
-                bid_qty   = _fv(item, 'bestBidQty',   'bidQty',   'BID_QTY',   'lendQty',   'offerQty',    'LEND_QTY')
-                bid_price = _fv(item, 'bestBidPrice',  'bidPrice', 'BID_PRICE', 'lendPrice', 'offerPrice',  'LEND_PRICE', 'lendingFee', 'fee')
-                ask_qty   = _fv(item, 'bestAskQty',    'askQty',   'ASK_QTY',   'borrowQty', 'BORROW_QTY',  'borrowingQty')
+                bid_qty   = _fv(item, 'bestBidQty',   'bidQty',   'BID_QTY',   'lendQty',   'offerQty')
+                bid_price = _fv(item, 'bestBidPrice',  'bidPrice', 'BID_PRICE', 'lendPrice', 'offerPrice', 'lendingFee', 'fee')
+                ask_qty   = _fv(item, 'bestAskQty',    'askQty',   'ASK_QTY',   'borrowQty', 'BORROW_QTY')
                 ask_price = _fv(item, 'bestAskPrice',  'askPrice', 'ASK_PRICE', 'borrowPrice','BORROW_PRICE','borrowingFee')
                 ltp       = _fv(item, 'ltp', 'LTP', 'lastPrice', 'lastTradedPrice', 'ltP')
 
@@ -3724,8 +3767,9 @@ def get_slb_data():
                 has_ask = float(ask_qty or 0) > 0
                 if has_bid:
                     print(f"    *** BID {sym} {expiry} qty={bid_qty} @{bid_price}")
+
                 contracts.append({
-                    'symbol': sym, 'expiry': expiry, 'series': series,
+                    'symbol': sym, 'expiry': expiry, 'series': series_val,
                     'bidQty': bid_qty, 'bidPrice': bid_price,
                     'askQty': ask_qty, 'askPrice': ask_price,
                     'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask,
@@ -3734,126 +3778,98 @@ def get_slb_data():
             return contracts
 
         # ════════════════════════════════════════════════════════════
-        # STRATEGY 1 – liveWatch?series=SLB  (whole market, one call)
+        # STRATEGY 1 — /api/slbMarketWatch per series number
+        # The NSE SLB page filters by series (03 = March, etc.)
         # ════════════════════════════════════════════════════════════
-        all_live_items = []
-        live_raw = _get_json('https://www.nseindia.com/api/liveWatch?series=SLB')
-        if live_raw:
-            if isinstance(live_raw, list):
-                all_live_items = live_raw
-            elif isinstance(live_raw, dict):
-                for k in ('data', 'records', 'Table', 'slb', 'SLB', 'response'):
-                    if isinstance(live_raw.get(k), list):
-                        all_live_items = live_raw[k]
-                        break
-            print(f"  [SLB] liveWatch returned {len(all_live_items)} items")
-            if all_live_items:
-                print(f"  [SLB] sample keys: {list(all_live_items[0].keys()) if isinstance(all_live_items[0], dict) else '?'}")
+        all_items_by_series = []
+        tried_urls = []
+
+        for snum in sorted(req_series):
+            url = f'https://www.nseindia.com/api/slbMarketWatch?series={snum}'
+            raw = _get_json(url)
+            tried_urls.append(url)
+            if raw:
+                items = _extract_items(raw)
+                print(f"  [SLB] series={snum}: {len(items)} items")
+                all_items_by_series.extend(items)
 
         # ════════════════════════════════════════════════════════════
-        # STRATEGY 2 – equity-stockIndices?index=SLB
+        # STRATEGY 2 — full dump (no series param)
         # ════════════════════════════════════════════════════════════
-        if not all_live_items:
-            idx_raw = _get_json('https://www.nseindia.com/api/equity-stockIndices?index=SLB')
-            if idx_raw and isinstance(idx_raw, dict):
-                all_live_items = idx_raw.get('data', [])
-                print(f"  [SLB] equity-stockIndices returned {len(all_live_items)} items")
+        if not all_items_by_series:
+            raw = _get_json('https://www.nseindia.com/api/slbMarketWatch')
+            if raw:
+                all_items_by_series = _extract_items(raw)
+                print(f"  [SLB] full dump: {len(all_items_by_series)} items")
 
         # ════════════════════════════════════════════════════════════
-        # STRATEGY 3 – per-symbol quote-equity trade_info
+        # Build results per symbol
         # ════════════════════════════════════════════════════════════
         results = []
-        symbols_found_in_live = set()
-
-        # First, try to match symbols from the global live data
-        if all_live_items:
-            for symbol in symbols:
-                matching = [i for i in all_live_items
-                            if isinstance(i, dict) and
-                            str(i.get('symbol') or i.get('Symbol') or '').upper() == symbol]
-                if matching:
-                    symbols_found_in_live.add(symbol)
-                    contracts = _parse_items(matching, symbol)
-                    results.append({'symbol': symbol, 'contracts': contracts,
-                                    'raw_count': len(matching), 'raw_items': matching[:2],
-                                    'source': 'liveWatch'})
-                    print(f"  [SLB] {symbol}: {len(contracts)} contracts from liveWatch")
-
-        # For symbols not found in live data, try per-symbol endpoints
         for symbol in symbols:
-            if symbol in symbols_found_in_live:
-                continue
-            print(f"\n  [SLB] {symbol} — trying per-symbol endpoints")
-            items = []
-            source = 'none'
-
-            per_sym_urls = [
-                f'https://www.nseindia.com/api/liveWatch?series=SLB&symbol={symbol}',
-                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}&section=trade_info',
-                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}',
-            ]
-            for url in per_sym_urls:
-                raw = _get_json(url)
-                if not raw:
+            if all_items_by_series:
+                contracts = _parse_items(all_items_by_series, symbol, months)
+                if contracts or any(
+                    str(i.get('symbol') or i.get('Symbol') or '').upper() == symbol
+                    for i in all_items_by_series
+                ):
+                    results.append({
+                        'symbol': symbol, 'contracts': contracts,
+                        'raw_count': len(all_items_by_series),
+                        'raw_items': [i for i in all_items_by_series
+                                      if str(i.get('symbol') or i.get('Symbol') or '').upper() == symbol][:3],
+                        'source': 'slbMarketWatch'
+                    })
+                    print(f"  [SLB] {symbol}: {len(contracts)} contracts")
                     continue
-                if isinstance(raw, list) and raw:
-                    items = raw; source = url; break
-                if isinstance(raw, dict):
-                    # quote-equity: check slbInfo or marketDeptOrderBook
-                    slb_info = raw.get('slbInfo') or raw.get('slbData') or raw.get('SLBData')
-                    if slb_info:
-                        items = slb_info if isinstance(slb_info, list) else [slb_info]
-                        source = url; break
-                    # Also try nested data
-                    for k in ('data', 'records', 'Table', 'slb', 'SLB'):
-                        if isinstance(raw.get(k), list) and raw[k]:
-                            items = raw[k]; source = url; break
-                    if items:
-                        break
 
-            # ── Strategy 4: NSE CSV report fallback ─────────────────
-            if not items:
-                try:
-                    today = _dt.date.today()
-                    date_str = today.strftime('%d%m%Y')
-                    csv_url = f'https://archives.nseindia.com/archives/slbs/slbftp/slbwatch{date_str}.csv'
-                    r_csv = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
-                    print(f"    CSV {r_csv.status_code} ← {csv_url}")
-                    if r_csv.ok and r_csv.text.strip():
-                        reader = _csv.DictReader(io.StringIO(r_csv.text))
-                        for row in reader:
-                            sym_col = str(row.get('SYMBOL') or row.get('Symbol') or row.get('symbol') or '').upper().strip()
-                            if sym_col == symbol:
-                                items.append(dict(row))
-                        source = 'csv'
-                        print(f"    CSV: {len(items)} rows for {symbol}")
-                except Exception as ce:
-                    print(f"    CSV error: {ce}")
+            # ════════════════════════════════════════════════════════
+            # STRATEGY 3 — NSE archives CSV (EOD fallback)
+            # ════════════════════════════════════════════════════════
+            csv_items = []
+            try:
+                today = _dt.date.today()
+                date_str = today.strftime('%d%m%Y')
+                csv_url = f'https://archives.nseindia.com/archives/slbs/slbftp/slbwatch{date_str}.csv'
+                r_csv = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
+                print(f"  [SLB] CSV {r_csv.status_code} ← {csv_url}")
+                if r_csv.ok and r_csv.text.strip():
+                    reader = _csv.DictReader(io.StringIO(r_csv.text))
+                    for row in reader:
+                        sym_col = str(row.get('SYMBOL') or row.get('Symbol') or '').upper().strip()
+                        if sym_col == symbol:
+                            csv_items.append(dict(row))
+                    print(f"  [SLB] CSV: {len(csv_items)} rows for {symbol}")
+            except Exception as ce:
+                print(f"  [SLB] CSV error: {ce}")
 
-            if not items:
+            if csv_items:
+                contracts = _parse_items(csv_items, symbol, months)
+                results.append({'symbol': symbol, 'contracts': contracts,
+                                'raw_count': len(csv_items), 'raw_items': csv_items[:2],
+                                'source': 'csv'})
+            else:
                 results.append({
                     'symbol': symbol,
-                    'error': 'No data from NSE — market may be closed or symbol not in SLB segment',
-                    'contracts': [], 'raw_items': [], 'source': 'none'
-                })
-            else:
-                contracts = _parse_items(items, symbol)
-                results.append({
-                    'symbol': symbol, 'contracts': contracts,
-                    'raw_count': len(items), 'raw_items': items[:2],
-                    'source': source
+                    'error': 'No data — market closed or symbol not in SLB segment today',
+                    'contracts': [], 'raw_items': [],
+                    'source': 'none',
+                    'tried': tried_urls,
                 })
 
         return jsonify({
             'slb':       results,
             'timestamp': _dt.datetime.now().strftime('%H:%M:%S'),
-            'note':      'Live data during market hours (10:00–15:30 IST). NSE SLB market is thin — many stocks show no bids outside market hours.',
+            'note':      'SLB market hours: 09:15–17:00 IST on trading days. Data only available when market is open.',
         })
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e), 'slb': []}), 500
+
+
+
 
 
 if __name__ == '__main__':
