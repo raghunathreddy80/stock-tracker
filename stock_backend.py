@@ -36,7 +36,7 @@ _BSE_CODE_CACHE = {
     'HIKAL':      '524735',
     'IEX':        '540768',
     'SOLARA':     '541540',
-    'ENTERO':     '544010',
+    'ENTERO':     '544122',   # Entero Healthcare Solutions — was wrong (544010 = SBI ETF)
     'NEULANDLAB': '524558',
     'LAURUSLABS': '540222',
     'CANBK':      '532483',
@@ -998,7 +998,7 @@ def get_announcements():
             return f"https://www.bseindia.com/xml-data/corpfiling/{folder}/{att}"
         return ''
 
-    def parse_items(items, symbol, base, exchange):
+    def parse_items(items, symbol, base, exchange, verify_scrip=None):
         out = []
         for item in items:
             if exchange == 'BSE':
@@ -1009,6 +1009,17 @@ def get_announcements():
                 company = (item.get('SLONGNAME') or item.get('COMPANYNAME') or base)
                 cat     = (item.get('CATEGORYNAME') or item.get('NEWSCATNAME') or 'General')
                 att_url = bse_att_url(news_id, att, raw_dt)
+
+                # Sanity check: if the returned company name has zero overlap with
+                # the NSE base symbol, the scrip code is probably wrong — skip it
+                if verify_scrip:
+                    co_upper = company.upper().replace(' ', '')
+                    sym_upper = base.upper()
+                    # Allow if first 3 chars of symbol appear in company name
+                    if sym_upper[:4] not in co_upper and sym_upper not in co_upper:
+                        print(f"  [SKIP] BSE returned wrong company: '{company}' for symbol {base} — scrip code mismatch, removing from cache")
+                        _BSE_CODE_CACHE.pop(base, None)
+                        return []  # reject entire batch for this symbol
             else:
                 news_id = ''
                 att     = (item.get('attchmntFile') or '').strip()
@@ -1122,7 +1133,7 @@ def get_announcements():
                     items = payload if isinstance(payload, list) else \
                             payload.get('Table', payload.get('Data', []))
                     print(f"  BSE AnnGetData: {len(items)} items")
-                    parsed = parse_items(items, symbol, base, 'BSE')
+                    parsed = parse_items(items, symbol, base, 'BSE', verify_scrip=True)
                     all_ann.extend(parsed)
                     got = bool(parsed)
                     for a in parsed[:3]:
