@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: stock-tracker
+    runtime: python
+    buildCommand: |
+      apt-get update && apt-get install -y chromium chromium-driver && pip install -r requirements.txt
+    startCommand: gunicorn stock_backend:app
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: FLASK_ENV
+        value: production
+      - key: CHROME_BIN
+        value: /usr/bin/chromium
+      - key: CHROMEDRIVER_PATH
+        value: /usr/bin/chromedriver

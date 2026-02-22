@@ -3636,6 +3636,9 @@ def get_slb_data():
     Fetch SLB data from NSE India.
 
     Strategy (in priority order):
+      0. Selenium (headless Chrome) — JS-rendered table, same as slb.py approach
+         Most reliable since NSE table is JavaScript-rendered.
+         Falls back gracefully if Selenium/Chrome not available.
       1. Scrape NSE HTML page + parse td[@headers] attributes
          e.g. //td[@headers='bestOffers price2 CANBK']
       2. /api/slbMarketWatch?series=03  (JSON API per month series number)
@@ -3702,6 +3705,228 @@ def get_slb_data():
             sess.get('https://www.nseindia.com', headers=HDR_HTML, timeout=10, proxies=proxies)
         except Exception:
             pass
+
+        # ============================================================
+        # STRATEGY 0: Selenium headless Chrome (JS-rendered table)
+        # NSE's SLB page renders table rows via JavaScript after load.
+        # requests/lxml only see an empty skeleton.  Selenium waits for
+        # the JS to finish and then reads the fully-rendered DOM — the
+        # same technique used in the standalone slb.py alert script.
+        #
+        # Column index mapping (from slb.py observation):
+        #   cols[0]  = Symbol
+        #   cols[1]  = Series
+        #   cols[2]  = Expiry
+        #   cols[3]  = (prev close / LTP)
+        #   cols[4]  = (open / other)
+        #   cols[5]  = Best Bid Qty
+        #   cols[6]  = Best Bid Price
+        #   cols[7]  = Best Offer Qty   (or Best Ask Qty)
+        #   cols[8]  = Best Offer Price
+        # ============================================================
+        def _selenium_scrape(symbols_to_find):
+            """
+            Use Selenium headless Chrome to scrape the JS-rendered SLB table.
+            Returns dict: symbol -> list of contract dicts (same shape as other strategies).
+            Returns None if Selenium is unavailable or scrape fails.
+            """
+            try:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.service import Service as ChromeService
+                from selenium.webdriver.chrome.options import Options as ChromeOptions
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+            except ImportError:
+                print('  [SLB Selenium] selenium not installed — skipping')
+                return None
+
+            driver = None
+            try:
+                options = ChromeOptions()
+                options.add_argument('--headless=new')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--disable-blink-features=AutomationControlled')
+                options.add_argument('--disable-gpu')
+                options.add_argument('--window-size=1920,1080')
+                options.add_argument(f'user-agent={UA}')
+                options.add_experimental_option('excludeSwitches', ['enable-automation'])
+                options.add_experimental_option('useAutomationExtension', False)
+
+                # ── Resolve Chrome binary & driver ──────────────────
+                # Priority: env vars (set in render.yaml) → common paths → webdriver-manager
+                import shutil as _shutil
+
+                chrome_bin = (
+                    os.environ.get('CHROME_BIN') or
+                    _shutil.which('chromium') or
+                    _shutil.which('chromium-browser') or
+                    _shutil.which('google-chrome') or
+                    '/usr/bin/chromium'
+                )
+                chromedriver_bin = (
+                    os.environ.get('CHROMEDRIVER_PATH') or
+                    _shutil.which('chromedriver') or
+                    '/usr/bin/chromedriver'
+                )
+
+                if os.path.exists(chrome_bin):
+                    options.binary_location = chrome_bin
+                    print(f'  [SLB Selenium] using Chrome binary: {chrome_bin}')
+                    print(f'  [SLB Selenium] using chromedriver:  {chromedriver_bin}')
+                    service = ChromeService(executable_path=chromedriver_bin)
+                else:
+                    # Local dev: fall back to webdriver-manager auto-download
+                    print(f'  [SLB Selenium] system Chrome not found, trying webdriver-manager')
+                    try:
+                        from webdriver_manager.chrome import ChromeDriverManager
+                        service = ChromeService(ChromeDriverManager().install())
+                    except Exception:
+                        service = ChromeService()   # last resort: PATH chromedriver
+
+                driver = webdriver.Chrome(service=service, options=options)
+                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+                url = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
+                print(f'  [SLB Selenium] loading {url}')
+                driver.get(url)
+
+                # Wait up to 15 s for at least one <tbody tr> to appear
+                try:
+                    WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((By.XPATH, '//table//tbody/tr'))
+                    )
+                except Exception:
+                    print('  [SLB Selenium] timeout waiting for table rows')
+
+                import time as _time
+                _time.sleep(3)   # extra buffer for all rows to render
+
+                rows = driver.find_elements(By.XPATH, '//table//tbody/tr')
+                print(f'  [SLB Selenium] found {len(rows)} table rows')
+
+                results_map = {}
+                for row in rows:
+                    try:
+                        text = row.text.strip()
+                        if not text:
+                            continue
+                        cols = text.split()
+                        # Need at least 9 columns to get bid/offer data
+                        if len(cols) < 7:
+                            continue
+
+                        sym    = cols[0].upper()
+                        series = cols[1].upper() if len(cols) > 1 else 'B'
+                        expiry = cols[2].upper() if len(cols) > 2 else ''
+
+                        # Only process symbols we care about
+                        if sym not in symbols_to_find:
+                            continue
+
+                        # Extract bid/offer — indices from slb.py:
+                        #  cols[5]=bid_qty  cols[6]=bid_price
+                        #  cols[7]=ask_qty  cols[8]=ask_price  (if present)
+                        def _safe_int(s):
+                            try:
+                                return int(str(s).replace(',', ''))
+                            except Exception:
+                                return 0
+
+                        def _safe_float(s):
+                            try:
+                                return float(str(s).replace(',', ''))
+                            except Exception:
+                                return 0.0
+
+                        bid_qty   = _safe_int(cols[5])   if len(cols) > 5 else 0
+                        bid_price = _safe_float(cols[6]) if len(cols) > 6 else 0.0
+                        ask_qty   = _safe_int(cols[7])   if len(cols) > 7 else 0
+                        ask_price = _safe_float(cols[8]) if len(cols) > 8 else 0.0
+                        ltp       = _safe_float(cols[3]) if len(cols) > 3 else 0.0
+
+                        has_bid = bid_qty > 0
+                        has_ask = ask_qty > 0
+
+                        if has_bid:
+                            print(f'  [SLB Selenium] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
+                        if has_ask:
+                            print(f'  [SLB Selenium]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
+
+                        if sym not in results_map:
+                            results_map[sym] = []
+                        results_map[sym].append({
+                            'symbol':   sym,
+                            'expiry':   expiry,
+                            'series':   series,
+                            'bidQty':   bid_qty,
+                            'bidPrice': bid_price,
+                            'askQty':   ask_qty,
+                            'askPrice': ask_price,
+                            'ltp':      ltp,
+                            'hasBid':   has_bid,
+                            'hasAsk':   has_ask,
+                            'raw':      {'row_text': text},
+                        })
+                    except Exception as row_err:
+                        print(f'  [SLB Selenium] row parse error: {row_err}')
+                        continue
+
+                print(f'  [SLB Selenium] scraped {len(results_map)} matching symbols: {list(results_map.keys())}')
+                return results_map
+
+            except Exception as e:
+                print(f'  [SLB Selenium] failed: {e}')
+                return None
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+        # ── Run Strategy 0: Selenium ────────────────────────────────
+        selenium_results = _selenium_scrape(set(symbols))
+
+        # If Selenium succeeded and found ALL requested symbols, return immediately
+        if selenium_results is not None:
+            results = []
+            for symbol in symbols:
+                contracts = selenium_results.get(symbol, [])
+                # Filter by requested months if specified
+                if months and contracts:
+                    contracts = [c for c in contracts
+                                 if not c['expiry'] or any(_month_abbr(m) in c['expiry'] for m in months)]
+                if contracts:
+                    results.append({
+                        'symbol':    symbol,
+                        'contracts': contracts,
+                        'raw_count': len(contracts),
+                        'raw_items': contracts[:2],
+                        'source':    'selenium',
+                    })
+                    print(f'  [SLB] {symbol}: {len(contracts)} contracts (Selenium)')
+                else:
+                    # Symbol not found even by Selenium — include empty result
+                    results.append({
+                        'symbol':    symbol,
+                        'contracts': [],
+                        'raw_count': 0,
+                        'raw_items': [],
+                        'source':    'selenium',
+                        'note':      'No SLB data for this symbol right now — market may be closed or symbol not in SLB segment',
+                    })
+
+            return jsonify({
+                'slb':       results,
+                'timestamp': _dt.datetime.now().strftime('%H:%M:%S'),
+                'note':      'SLB data available during market hours (09:15–15:30 IST) on trading days.',
+                'source':    'selenium',
+            })
+
+        # ── Strategy 0 failed — fall through to existing strategies ─
+        print('  [SLB] Selenium unavailable, falling back to requests-based strategies')
 
         # ============================================================
         # STRATEGY 1: HTML scrape + parse td[@headers] XPath
