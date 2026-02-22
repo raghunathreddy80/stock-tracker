@@ -1612,6 +1612,53 @@
             </div>
         </div>
 
+        <!-- SLB Tab -->
+        <div class="tab-content" id="slb-tab">
+            <div style="padding:1.5rem;">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:0.8rem;">
+                    <div>
+                        <h2 style="margin:0;font-size:1.2rem;color:var(--text-primary);">📋 Securities Lending &amp; Borrowing</h2>
+                        <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.25rem;">Series B · Watching: MAR, APR, MAY 2026 · Polls every 60s</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:0.8rem;">
+                        <div id="slbStatus" style="font-size:0.78rem;color:var(--text-secondary);">Not loaded</div>
+                        <button class="btn" onclick="fetchSLB()" style="padding:0.4rem 0.9rem;font-size:0.85rem;">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div id="slbAlertBanner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.5);border-radius:8px;padding:0.8rem 1rem;margin-bottom:1rem;color:#ef4444;font-weight:600;font-size:0.9rem;"></div>
+
+                <div style="margin-bottom:1rem;">
+                    <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.4rem;font-weight:600;">WATCHING</div>
+                    <div id="slbSymbolTags" style="display:flex;gap:0.4rem;flex-wrap:wrap;"></div>
+                </div>
+
+                <div style="overflow-x:auto;">
+                    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
+                        <thead>
+                            <tr style="background:var(--bg-tertiary);border-bottom:1px solid var(--border-color);">
+                                <th style="padding:0.7rem 1rem;text-align:left;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Symbol</th>
+                                <th style="padding:0.7rem 1rem;text-align:left;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Expiry</th>
+                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Bid Qty</th>
+                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Bid Price</th>
+                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Ask Qty</th>
+                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Ask Price</th>
+                                <th style="padding:0.7rem 1rem;text-align:center;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="slbTableBody">
+                            <tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">Loading SLB data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div style="margin-top:1.5rem;">
+                    <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.5rem;font-weight:600;">🔔 BID ALERT LOG</div>
+                    <div id="slbAlertLog" style="font-size:0.8rem;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:8px;padding:0.8rem;min-height:3rem;max-height:10rem;overflow-y:auto;">No bids detected yet.</div>
+                </div>
+            </div>
+        </div>
+
         <!-- Admin: Users Tab (only visible to raghunathreddy80) -->
         <div class="tab-content" id="adminUsers" style="display:none;">
             <div class="search-section" style="margin-bottom:1.5rem;">

@@ -3659,45 +3659,87 @@ def get_slb_data():
 
         for symbol in symbols:
             try:
-                # NSE SLB API endpoint
-                url = f"https://www.nseindia.com/api/slbMarket?symbol={symbol}"
-                r = sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+                # Try multiple NSE SLB endpoint formats
+                urls_to_try = [
+                    f"https://www.nseindia.com/api/slbMarket?symbol={symbol}",
+                    f"https://www.nseindia.com/api/slb-securities?symbol={symbol}",
+                    f"https://www.nseindia.com/api/market-data-pre-open?key=SLB&symbol={symbol}",
+                ]
+                r = None
+                for url in urls_to_try:
+                    try:
+                        _r = sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+                        if _r and _r.ok and _r.text.strip() and _r.text.strip() not in ('null', '[]', '{}'):
+                            r = _r
+                            print(f"  SLB {symbol}: working URL: {url}")
+                            break
+                        else:
+                            print(f"  SLB {symbol}: {url} → HTTP {_r.status_code if _r else 'fail'}, body={(_r.text[:80] if _r else '')!r}")
+                    except Exception as ue:
+                        print(f"  SLB {symbol}: {url} error: {ue}")
 
-                # If empty/blocked, refresh session and retry once
-                if not r or not r.text.strip():
+                # If all failed, refresh session and retry first URL
+                if not r:
                     sess = get_nse_session(proxies=proxies, force_refresh=True)
-                    r = sess.get(url, headers=NSE_HDR, timeout=15, proxies=proxies)
+                    try:
+                        r = sess.get(urls_to_try[0], headers=NSE_HDR, timeout=15, proxies=proxies)
+                    except Exception:
+                        pass
 
                 if not r or not r.ok:
                     print(f"  SLB {symbol}: HTTP {r.status_code if r else 'no response'}")
                     results.append({'symbol': symbol, 'error': 'No data', 'contracts': []})
                     continue
 
-                raw = r.json()
-                print(f"  SLB {symbol}: got response, keys={list(raw.keys()) if isinstance(raw, dict) else 'list'}")
+                # Log raw response for debugging field names
+                raw_text = r.text[:500] if r.text else ''
+                print(f"  SLB {symbol}: HTTP {r.status_code}, body preview: {raw_text}")
+
+                try:
+                    raw = r.json()
+                except Exception as je:
+                    print(f"  SLB {symbol}: JSON parse error: {je}")
+                    results.append({'symbol': symbol, 'error': 'Invalid JSON', 'contracts': []})
+                    continue
+
+                print(f"  SLB {symbol}: keys={list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__}")
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        print(f"    {k}: {str(v)[:120]}")
 
                 # NSE returns data under different keys depending on version
                 items = []
                 if isinstance(raw, list):
                     items = raw
                 elif isinstance(raw, dict):
-                    items = (raw.get('data') or raw.get('slbData') or
-                             raw.get('orderBook') or raw.get('SLB') or [])
+                    for key in ['data', 'slbData', 'orderBook', 'SLB', 'slb', 'Table', 'records']:
+                        if raw.get(key):
+                            items = raw[key]
+                            print(f"  SLB {symbol}: found {len(items)} items under key '{key}'")
+                            if items:
+                                print(f"    First item keys: {list(items[0].keys()) if isinstance(items[0], dict) else items[0]}")
+                            break
+
+                if not items:
+                    print(f"  SLB {symbol}: no items found in response")
+                    results.append({'symbol': symbol, 'error': 'No items in response', 'contracts': []})
+                    continue
 
                 # Filter: Series B only, and only requested months
                 contracts = []
                 for item in items:
-                    series  = (item.get('series') or item.get('Series') or '').upper().strip()
-                    expiry  = (item.get('expiryDate') or item.get('expiry') or
-                               item.get('ExpiryDate') or item.get('contractExpiry') or '').upper().strip()
-                    sym     = (item.get('symbol') or item.get('Symbol') or symbol).upper()
+                    # Print first item's keys to understand structure
+                    series  = str(item.get('series') or item.get('Series') or item.get('SERIES') or '').upper().strip()
+                    expiry  = str(item.get('expiryDate') or item.get('expiry') or item.get('ExpiryDate') or
+                               item.get('contractExpiry') or item.get('EXPIRY_DT') or '').upper().strip()
+                    sym     = str(item.get('symbol') or item.get('Symbol') or item.get('SYMBOL') or symbol).upper()
 
                     # Series B filter
-                    if series != 'B':
+                    if series and series != 'B':
                         continue
 
                     # Month filter — check if any requested month appears in expiry string
-                    if months:
+                    if months and expiry:
                         match = any(m.upper() in expiry.upper() for m in months)
                         if not match:
                             continue
