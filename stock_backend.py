@@ -3764,7 +3764,6 @@ def get_slb_data():
                             '--disable-dev-shm-usage',
                             '--disable-gpu',
                             '--disable-blink-features=AutomationControlled',
-                            '--disable-http2',            # avoid HTTP2 protocol errors from NSE
                             '--ignore-certificate-errors',
                             '--allow-running-insecure-content',
                         ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
@@ -3794,32 +3793,50 @@ def get_slb_data():
                     """)
                     page = ctx.new_page()
 
-                    # Go directly to SLB page — skip homepage (NSE blocks headless there)
+                    # Step 1: load NSE homepage to get session cookies
+                    # Use 'load' wait and catch errors gracefully
                     try:
-                        page.goto(url, timeout=45000, wait_until='domcontentloaded')
+                        page.goto('https://www.nseindia.com', timeout=30000, wait_until='load')
+                        page.wait_for_timeout(3000)
+                        print('  [SLB Playwright] homepage loaded OK')
+                    except Exception as home_err:
+                        # Homepage may fail due to bot detection — try to continue anyway
+                        print(f'  [SLB Playwright] homepage warning (continuing): {home_err}')
+                        page.wait_for_timeout(1000)
+
+                    # Step 2: navigate to the SLB page
+                    try:
+                        page.goto(url, timeout=45000, wait_until='load')
                     except Exception as nav_err:
-                        print(f'  [SLB Playwright] navigation error: {nav_err}')
+                        print(f'  [SLB Playwright] SLB page navigation error: {nav_err}')
+                        # Still try to get whatever content we have
+                        html_debug = page.content()
+                        print(f'  [SLB Playwright] partial content ({len(html_debug)} bytes): {html_debug[:800]}')
                         browser.close()
                         return {}
 
-                    # Wait for JS to render the data table
+                    # Step 3: wait for XHR data to populate the table
+                    # NSE loads table data via async XHR after page load
                     try:
-                        page.wait_for_selector('td[headers]', timeout=30000)
+                        # Wait for network to go idle (all XHR done)
+                        page.wait_for_load_state('networkidle', timeout=20000)
                     except PWTimeout:
-                        # Fallback: check if there is any table at all
-                        try:
-                            page.wait_for_selector('table', timeout=10000)
-                            print('  [SLB Playwright] found table but no td[headers] — page may be partially rendered')
-                        except PWTimeout:
-                            print('  [SLB Playwright] timed out — no table rendered')
-                            # Save a debug snapshot of what we got anyway
-                            html_debug = page.content()
-                            print(f'  [SLB Playwright] page content preview: {html_debug[:500]}')
-                            browser.close()
-                            return {}
+                        print('  [SLB Playwright] networkidle timeout — checking for table anyway')
 
-                    # Let remaining rows finish rendering
-                    page.wait_for_timeout(3000)
+                    # Step 4: explicitly wait for td[headers] cells to appear
+                    try:
+                        page.wait_for_selector('td[headers]', timeout=20000)
+                        print('  [SLB Playwright] td[headers] found in DOM')
+                    except PWTimeout:
+                        # Log full page for diagnosis
+                        html_debug = page.content()
+                        print(f'  [SLB Playwright] no td[headers] found. Page size={len(html_debug)}')
+                        print(f'  [SLB Playwright] content preview: {html_debug[:1000]}')
+                        browser.close()
+                        return {}
+
+                    # Let any remaining lazy rows render
+                    page.wait_for_timeout(2000)
                     html = page.content()
                     browser.close()
                     print(f'  [SLB Playwright] got {len(html)} bytes of rendered HTML')
