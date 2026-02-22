@@ -10,4 +10,4 @@ pypdf==4.0.1
 Werkzeug==3.0.1
 gunicorn==21.2.0
 psycopg2-binary==2.9.10
-playwright>=1.42.0
+lxml==5.1.0

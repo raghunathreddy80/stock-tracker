@@ -232,12 +232,6 @@ def unauthorized():
 # Initialize database
 init_db()
 
-
-# ── Auto-install Playwright browsers at startup ───────────────────────────────
-# Render free tier does not persist cache between deploys, so we install
-# Chromium once at startup if the executable is missing.
-# Playwright Chromium is installed via build.sh at deploy time
-
 # ── Persistent NSE session (shared across requests, refreshed when needed) ────
 import threading
 _nse_session = None
@@ -3639,221 +3633,310 @@ def deepdive_simple():
 @app.route('/api/slb', methods=['POST'])
 def get_slb_data():
     """
-    Fetch SLB (Securities Lending & Borrowing) data from NSE.
+    Fetch SLB data from NSE India.
 
-    Uses Playwright (headless Chromium) to load the NSE SLB page,
-    selects the requested series/expiry, then reads bid/offer/ltp
-    data using the same XPath approach as the working local script.
+    Strategy (in priority order):
+      1. Scrape NSE HTML page + parse td[@headers] attributes
+         e.g. //td[@headers='bestOffers price2 CANBK']
+      2. /api/slbMarketWatch?series=03  (JSON API per month series number)
+      3. /api/slbMarketWatch            (full JSON dump)
+      4. NSE archives CSV slbwatch{DDMMYYYY}.csv  (EOD fallback)
     """
-    import datetime as _dt
-
     try:
+        import datetime as _dt, io, csv as _csv, re as _re
+        try:
+            from lxml import etree as _etree
+            HAS_LXML = True
+        except ImportError:
+            HAS_LXML = False
+
         data       = request.get_json() or {}
         symbols    = [s.upper().strip() for s in data.get('symbols', []) if s.strip()]
-        months     = data.get('months', [])    # e.g. ['MAR2026', 'APR2026']
+        months     = data.get('months', [])
         proxy_host = data.get('proxy_host', '').strip()
         proxy_port = data.get('proxy_port', '').strip()
+        proxies    = make_proxies(proxy_host, proxy_port)
 
         if not symbols:
             return jsonify({'slb': []})
 
-        # Map month names to NSE series values (matches the <option value="..."> in the dropdown)
-        # Series B = regular, X-series = extended
-        # Only X-series values (red in dropdown) — M1/M2 excluded
-        MONTH_TO_SERIES = {
-            'JAN': 'X1', 'FEB': 'X2', 'MAR': 'X3',
-            'APR': 'X4', 'MAY': 'X5', 'JUN': 'X6',
-            'JUL': 'X7', 'AUG': 'X8', 'SEP': 'X9',
-            'OCT': 'X0', 'NOV': 'XN', 'DEC': 'XD',
+        UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        HDR_HTML = {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        HDR_API = {
+            'User-Agent': UA,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+            'X-Requested-With': 'XMLHttpRequest',
         }
 
-        # Build list of series values to select in the dropdown
-        series_values = []
+        MONTH_TO_SERIES = {
+            'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
+            'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
+            'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
+        }
+        MONTH_TO_XSERIES = {
+            'JAN': 'X1', 'FEB': 'X2', 'MAR': 'X3', 'APR': 'X4',
+            'MAY': 'X5', 'JUN': 'X6', 'JUL': 'X7', 'AUG': 'X8',
+            'SEP': 'X9', 'OCT': 'XA', 'NOV': 'XB', 'DEC': 'XD',
+        }
+
+        def _month_abbr(m):
+            return m[:3].upper() if m else ''
+
+        req_series = []
         for m in months:
-            abbr = m[:3].upper()
-            sv = MONTH_TO_SERIES.get(abbr)
-            if sv and sv not in series_values:
-                series_values.append(sv)
-        if not series_values:
-            series_values = ['X3']  # default to Mar-2026
+            abbr = _month_abbr(m)
+            if abbr in MONTH_TO_SERIES:
+                req_series.append(MONTH_TO_SERIES[abbr])
+                req_series.append(MONTH_TO_XSERIES[abbr])
 
-        print(f'[SLB] symbols={symbols} months={months} series={series_values}')
+        sess = get_nse_session(proxies=proxies)
 
-        def _scrape_all_series(series_values):
-            """
-            Opens browser ONCE, loops through all requested series in the
-            same page session — much faster than launching a new browser
-            per series. Mirrors the working local script logic exactly.
-            """
+        # Warm up with homepage first
+        try:
+            sess.get('https://www.nseindia.com', headers=HDR_HTML, timeout=10, proxies=proxies)
+        except Exception:
+            pass
+
+        # ============================================================
+        # STRATEGY 1: HTML scrape + parse td[@headers] XPath
+        # NSE renders cells like:
+        #   <td headers="bestBid qty2 CANBK">-</td>
+        #   <td headers="bestOffers price2 CANBK">0.12</td>
+        #   <td headers="bestOffers qty2 CANBK">1</td>
+        #   <td headers="ltp CANBK">153.91</td>
+        #   <td headers="expiryDate CANBK">27-Mar-2026</td>
+        # The last token in 'headers' is always the SYMBOL.
+        # ============================================================
+        def _scrape_html_for_series(series_param=None):
+            url = 'https://www.nseindia.com/market-data/securities-lending-and-borrowing'
+            if series_param:
+                url += f'?series={series_param}'
             try:
-                from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-            except ImportError:
-                print('  [SLB] Playwright not installed')
+                r = sess.get(url, headers=HDR_HTML, timeout=25, proxies=proxies)
+                print(f'  [SLB HTML] {r.status_code} <- {url} ({len(r.text)} bytes)')
+                if not r.ok or len(r.text) < 2000:
+                    return {}
+                html = r.text
+            except Exception as e:
+                print(f'  [SLB HTML] fetch error: {e}')
                 return {}
 
-            all_contracts = {}   # symbol -> list of contracts
+            scraped = {}   # sym -> {col_key: value}
 
-            def to_float(s):
+            if HAS_LXML:
                 try:
-                    return float(str(s).replace(',', ''))
-                except Exception:
-                    return 0.0
+                    parser = _etree.HTMLParser()
+                    tree = _etree.fromstring(html.encode(), parser)
+                    for td in tree.xpath('//td[@headers]'):
+                        hdr   = (td.get('headers') or '').strip()
+                        parts = hdr.split()
+                        if len(parts) < 2:
+                            continue
+                        sym = parts[-1].upper()
+                        col = ' '.join(parts[:-1]).lower()
+                        val = (td.text_content() if hasattr(td, 'text_content') else td.text or '').strip()
+                        if sym not in scraped:
+                            scraped[sym] = {}
+                        scraped[sym][col] = val
+                    print(f'  [SLB HTML lxml] {len(scraped)} symbols found: {list(scraped.keys())[:10]}')
+                except Exception as xe:
+                    print(f'  [SLB HTML lxml] error: {xe}')
 
-            # Set browser path to project dir so it survives Render deploys
-            import os as _os
-            _os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/src/browsers')
+            if not scraped:
+                # Regex fallback
+                pat = _re.compile(r'<td[^>]+headers="([^"]+)"[^>]*>(.*?)</td>', _re.IGNORECASE | _re.DOTALL)
+                for mo in pat.finditer(html):
+                    hdr   = mo.group(1).strip()
+                    val   = _re.sub(r'<[^>]+>', '', mo.group(2)).strip()
+                    parts = hdr.split()
+                    if len(parts) < 2:
+                        continue
+                    sym = parts[-1].upper()
+                    col = ' '.join(parts[:-1]).lower()
+                    if sym not in scraped:
+                        scraped[sym] = {}
+                    scraped[sym][col] = val
+                print(f'  [SLB HTML regex] {len(scraped)} symbols: {list(scraped.keys())[:10]}')
 
+            def _cv(cols, *col_keys):
+                for ck in col_keys:
+                    v = cols.get(ck, '')
+                    if v and v not in ('-', '--', 'NA', '–'):
+                        try:
+                            return float(str(v).replace(',', ''))
+                        except Exception:
+                            pass
+                return 0
+
+            results_map = {}
+            for sym, cols in scraped.items():
+                if sym not in symbols:
+                    continue
+                bid_qty   = _cv(cols, 'bestbid qty2',     'bestbid qty',     'bid qty2',     'bid qty')
+                bid_price = _cv(cols, 'bestbid price2',   'bestbid price',   'bid price2',   'bid price')
+                ask_qty   = _cv(cols, 'bestoffers qty2',  'bestoffers qty',  'offer qty2',   'offer qty')
+                ask_price = _cv(cols, 'bestoffers price2','bestoffers price', 'offer price2', 'offer price')
+                ltp       = _cv(cols, 'ltp', 'last price', 'ltp2')
+                expiry    = cols.get('expirydate', cols.get('expiry', '')).upper().strip()
+
+                has_bid = bid_qty > 0
+                has_ask = ask_qty > 0
+                if has_bid:
+                    print(f'  [SLB HTML] *** BID {sym} {expiry} qty={bid_qty} @{bid_price}')
+                if has_ask:
+                    print(f'  [SLB HTML]     offer {sym} {expiry} qty={ask_qty} @{ask_price}')
+
+                if sym not in results_map:
+                    results_map[sym] = []
+                results_map[sym].append({
+                    'symbol': sym, 'expiry': expiry, 'series': 'B',
+                    'bidQty': bid_qty, 'bidPrice': bid_price,
+                    'askQty': ask_qty, 'askPrice': ask_price,
+                    'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask,
+                    'raw': cols,
+                })
+            return results_map
+
+        # ============================================================
+        # STRATEGY 2+3: JSON API
+        # ============================================================
+        def _get_json(url):
             try:
-                with sync_playwright() as pw:
-                    browser = pw.chromium.launch(
-                        headless=True,
-                        args=[
-                            '--no-sandbox',
-                            '--disable-dev-shm-usage',
-                            '--disable-gpu',
-                            '--disable-blink-features=AutomationControlled',
-                            '--disable-http2',  # NSE blocks HTTP2 from headless browsers
-                        ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
-                    )
-                    ctx = browser.new_context(
-                        user_agent=(
-                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                            'AppleWebKit/537.36 (KHTML, like Gecko) '
-                            'Chrome/122.0.0.0 Safari/537.36'
-                        ),
-                        viewport={'width': 1920, 'height': 1080},
-                        locale='en-IN',
-                        timezone_id='Asia/Kolkata',
-                    )
-                    ctx.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
-                        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN','en']});
-                        window.chrome = {runtime: {}};
-                    """)
-                    page = ctx.new_page()
-
-                    # ── Step 1: Homepage first to get NSE session cookies ──
-                    print('  [SLB] Loading NSE homepage for cookies...')
-                    try:
-                        page.goto('https://www.nseindia.com', timeout=30000, wait_until='domcontentloaded')
-                        page.wait_for_timeout(3000)
-                        print('  [SLB] Homepage OK')
-                    except Exception as home_err:
-                        print(f'  [SLB] Homepage warn (continuing): {home_err}')
-
-                    # ── Step 2: Navigate to SLB page ────────────────
-                    print('  [SLB] Opening NSE SLB page...')
-                    try:
-                        page.goto(
-                            'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
-                            timeout=40000,
-                            wait_until='domcontentloaded'
-                        )
-                    except Exception as nav_err:
-                        print(f'  [SLB] SLB page nav error: {nav_err}')
-                        browser.close()
-                        return {}
-
-                    # Wait for the dropdown to appear
-                    DROPDOWN_XPATH = "//span[text()='Filter by']/following::select[1]"
-                    try:
-                        page.wait_for_selector(DROPDOWN_XPATH, timeout=20000)
-                        print('  [SLB] Page loaded, dropdown found')
-                    except PWTimeout:
-                        html_preview = page.content()
-                        print(f'  [SLB] Dropdown not found. Page preview: {html_preview[:600]}')
-                        browser.close()
-                        return {}
-
-                    # ── Step 2: Loop through each series in same browser ──
-                    for sv in series_values:
-                        print(f'  [SLB] Selecting series={sv}...')
-
-                        # Select the series in the dropdown
-                        try:
-                            page.select_option(DROPDOWN_XPATH, value=sv)
-                        except Exception as se:
-                            print(f'  [SLB] Could not select series {sv}: {se}')
-                            continue
-
-                        # Wait for table to refresh with new data
-                        page.wait_for_timeout(5000)
-                        try:
-                            page.wait_for_selector('table tbody tr', timeout=10000)
-                        except PWTimeout:
-                            print(f'  [SLB] No table rows for series {sv}')
-                            continue
-
-                        # ── Step 3: Read each stock row ──────────────
-                        for stock in symbols:
-                            try:
-                                def get_cell(col_idx, stk=stock):
-                                    """Same XPath as the working local script"""
-                                    try:
-                                        el = page.locator(
-                                            f"//a[text()='{stk}']/ancestor::tr/td[{col_idx}]"
-                                        ).first
-                                        val = el.inner_text().strip()
-                                        return val if val else '-'
-                                    except Exception:
-                                        return '-'
-
-                                bid_qty   = to_float(get_cell(2))
-                                bid_price = to_float(get_cell(3))
-                                ask_price = to_float(get_cell(4))
-                                ask_qty   = to_float(get_cell(5))
-                                ltp       = to_float(get_cell(6))
-                                has_bid   = bid_qty > 0
-                                has_ask   = ask_qty > 0
-
-                                print(f'  [SLB] {stock} [{sv}]: bid={bid_qty}@{bid_price} ask={ask_qty}@{ask_price} ltp={ltp}')
-
-                                contract = {
-                                    'symbol':   stock,
-                                    'expiry':   sv,
-                                    'series':   'B',
-                                    'bidQty':   bid_qty,
-                                    'bidPrice': bid_price,
-                                    'askQty':   ask_qty,
-                                    'askPrice': ask_price,
-                                    'ltp':      ltp,
-                                    'hasBid':   has_bid,
-                                    'hasAsk':   has_ask,
-                                }
-                                if stock not in all_contracts:
-                                    all_contracts[stock] = []
-                                all_contracts[stock].append(contract)
-
-                            except Exception as stock_err:
-                                print(f'  [SLB] {stock} [{sv}] error: {stock_err}')
-
-                    browser.close()
-                    print(f'  [SLB] Done. {sum(len(v) for v in all_contracts.values())} contracts across {len(series_values)} series')
-
+                r = sess.get(url, headers=HDR_API, timeout=20, proxies=proxies)
+                print(f'  [SLB JSON] {r.status_code} <- {url} ({len(r.text)} bytes)')
+                if r.ok and len(r.text.strip()) > 5:
+                    print(f'  [SLB JSON] preview: {r.text[:200]}')
+                    return r.json()
             except Exception as e:
-                print(f'  [SLB] Playwright error: {e}')
-                import traceback; traceback.print_exc()
+                print(f'  [SLB JSON] ERR: {e}')
+            return None
 
-            return all_contracts
+        def _extract_items(raw):
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                for k in ('data', 'slbData', 'records', 'Table', 'SLB', 'slb', 'response'):
+                    if isinstance(raw.get(k), list) and raw[k]:
+                        return raw[k]
+            return []
 
-        # ── Single browser launch for all series ───────────────────
-        all_contracts = _scrape_all_series(series_values)
+        def _fv(item, *keys):
+            for k in keys:
+                v = item.get(k)
+                if v is not None and str(v).strip() not in ('', '-', 'NA', '--'):
+                    try:
+                        return float(str(v).replace(',', ''))
+                    except Exception:
+                        return v
+            return 0
 
-        # ── Build response ─────────────────────────────────────────
-        slb_results = []
+        def _json_to_contracts(items, symbol, active_months):
+            contracts = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                sym = str(item.get('symbol') or item.get('Symbol') or '').upper().strip()
+                if sym != symbol:
+                    continue
+                expiry = str(
+                    item.get('expiryDate') or item.get('expiry') or
+                    item.get('ExpiryDate') or item.get('EXPIRY_DT') or ''
+                ).upper().strip()
+                if active_months and expiry:
+                    if not any(_month_abbr(m) in expiry for m in active_months):
+                        continue
+                bid_qty   = _fv(item, 'bestBidQty',   'bidQty',   'lendQty')
+                bid_price = _fv(item, 'bestBidPrice',  'bidPrice', 'lendPrice', 'fee')
+                ask_qty   = _fv(item, 'bestAskQty',    'askQty',   'borrowQty')
+                ask_price = _fv(item, 'bestAskPrice',  'askPrice', 'borrowPrice')
+                ltp       = _fv(item, 'ltp', 'LTP', 'lastPrice')
+                has_bid   = float(bid_qty or 0) > 0
+                has_ask   = float(ask_qty or 0) > 0
+                contracts.append({
+                    'symbol': sym, 'expiry': expiry, 'series': 'B',
+                    'bidQty': bid_qty, 'bidPrice': bid_price,
+                    'askQty': ask_qty, 'askPrice': ask_price,
+                    'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask, 'raw': item,
+                })
+            return contracts
+
+        # ── Run all strategies ──────────────────────────────────────
+        html_results = {}
+        series_to_try = req_series if req_series else ['']
+        for snum in series_to_try:
+            partial = _scrape_html_for_series(snum if snum else None)
+            for sym, contracts in partial.items():
+                if sym not in html_results:
+                    html_results[sym] = []
+                html_results[sym].extend(contracts)
+
+        json_items = []
+        missing = [s for s in symbols if s not in html_results or not html_results[s]]
+        if missing:
+            for snum in (req_series or ['']):
+                url = (f'https://www.nseindia.com/api/slbMarketWatch?series={snum}'
+                       if snum else 'https://www.nseindia.com/api/slbMarketWatch')
+                raw = _get_json(url)
+                if raw:
+                    json_items.extend(_extract_items(raw))
+
+        # ── Build per-symbol results ────────────────────────────────
+        results = []
         for symbol in symbols:
-            contracts = all_contracts.get(symbol, [])
-            slb_results.append({
-                'symbol':    symbol,
-                'contracts': contracts,
-                'raw_count': len(contracts),
-                'source':    'playwright' if contracts else 'none',
-                'error':     None if contracts else 'No data — market may be closed or symbol not in SLB segment',
-            })
+            if symbol in html_results and html_results[symbol]:
+                contracts = html_results[symbol]
+                if months:
+                    contracts = [c for c in contracts
+                                 if not c['expiry'] or any(_month_abbr(m) in c['expiry'] for m in months)]
+                results.append({'symbol': symbol, 'contracts': contracts,
+                                'raw_count': len(contracts), 'raw_items': contracts[:2],
+                                'source': 'html_scrape'})
+                print(f'  [SLB] {symbol}: {len(contracts)} contracts (HTML)')
+                continue
+
+            if json_items:
+                contracts = _json_to_contracts(json_items, symbol, months)
+                if contracts:
+                    results.append({'symbol': symbol, 'contracts': contracts,
+                                    'raw_count': len(contracts), 'raw_items': contracts[:2],
+                                    'source': 'json_api'})
+                    print(f'  [SLB] {symbol}: {len(contracts)} contracts (JSON)')
+                    continue
+
+            # CSV fallback
+            csv_items = []
+            try:
+                today   = _dt.date.today()
+                csv_url = f'https://archives.nseindia.com/archives/slbs/slbftp/slbwatch{today.strftime("%d%m%Y")}.csv'
+                r_csv   = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
+                print(f'  [SLB CSV] {r_csv.status_code} <- {csv_url}')
+                if r_csv.ok and r_csv.text.strip():
+                    for row in _csv.DictReader(io.StringIO(r_csv.text)):
+                        if str(row.get('SYMBOL') or '').upper().strip() == symbol:
+                            csv_items.append(dict(row))
+            except Exception as ce:
+                print(f'  [SLB CSV] error: {ce}')
+
+            if csv_items:
+                contracts = _json_to_contracts(csv_items, symbol, months)
+                results.append({'symbol': symbol, 'contracts': contracts,
+                                'raw_count': len(csv_items), 'raw_items': csv_items[:2],
+                                'source': 'csv'})
+            else:
+                results.append({
+                    'symbol': symbol,
+                    'error': 'No data — market may be closed or symbol not in SLB segment',
+                    'contracts': [], 'raw_items': [], 'source': 'none',
+                })
 
         return jsonify({
-            'slb':       slb_results,
+            'slb':       results,
             'timestamp': _dt.datetime.now().strftime('%H:%M:%S'),
             'note':      'SLB data available during market hours (09:15-15:30 IST) on trading days.',
         })
@@ -3862,6 +3945,9 @@ def get_slb_data():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e), 'slb': []}), 500
+
+
+
 
 
 if __name__ == '__main__':
