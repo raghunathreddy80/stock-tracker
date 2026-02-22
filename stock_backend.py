@@ -278,15 +278,45 @@ def get_nse_session(proxies=None, force_refresh=False):
         age = time.time() - _nse_session_time
         if force_refresh or _nse_session is None or age > 300:
             sess = req.Session()
+            _NSE_UA = (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            )
+            html_hdr = {
+                'User-Agent': _NSE_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+            }
             try:
-                sess.get('https://www.nseindia.com',
-                         headers={
-                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                             'Accept': 'text/html,application/xhtml+xml,*/*',
-                             'Accept-Language': 'en-US,en;q=0.9',
-                             'Referer': 'https://www.nseindia.com/',
-                         },
+                # Step 1: Homepage — seeds AKA_A2 + bm_sz
+                sess.get('https://www.nseindia.com', headers=html_hdr,
                          timeout=15, proxies=proxies)
+                time.sleep(0.5)
+                # Step 2: SLB page — seeds nsit + additional Akamai cookies
+                sess.get(
+                    'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+                    headers={**html_hdr, 'Referer': 'https://www.nseindia.com/'},
+                    timeout=15, proxies=proxies)
+                time.sleep(0.3)
+                # Step 3: A lightweight JSON endpoint — validates session for API calls
+                sess.get(
+                    'https://www.nseindia.com/api/market-status',
+                    headers={
+                        'User-Agent': _NSE_UA,
+                        'Accept': 'application/json, text/plain, */*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Referer': 'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    timeout=15, proxies=proxies)
                 print(f"  NSE session refreshed, cookies: {list(sess.cookies.keys())}")
             except Exception as e:
                 print(f"  NSE session init failed: {e}")
@@ -3792,32 +3822,9 @@ def get_slb_data():
                    'AppleWebKit/537.36 (KHTML, like Gecko) '
                    'Chrome/122.0.0.0 Safari/537.36')
 
-            def _fresh_nse_session():
-                """Open a fresh requests session and get NSE cookies."""
-                s = req.Session()
-                s.headers.update({
-                    'User-Agent': UA2,
-                    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                })
-                try:
-                    r = s.get('https://www.nseindia.com', timeout=15, proxies=proxies)
-                    print(f'  [SLB API] NSE homepage: {r.status_code}, cookies: {list(s.cookies.keys())}')
-                    # Also hit the SLB page to get any additional cookies
-                    s.headers.update({
-                        'Referer': 'https://www.nseindia.com/',
-                        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
-                    })
-                    s.get('https://www.nseindia.com/market-data/securities-lending-borrowing',
-                          timeout=15, proxies=proxies)
-                except Exception as e:
-                    print(f'  [SLB API] session warmup error: {e}')
-                return s
-
-            nse_s = _fresh_nse_session()
+            # Use the global session (already warmed up with proper Akamai cookies)
+            nse_s = get_nse_session(proxies=proxies, force_refresh=True)
+            print(f'  [SLB API] using global session, cookies: {list(nse_s.cookies.keys())}')
             api_headers = {
                 'Accept': 'application/json, text/plain, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -3835,7 +3842,7 @@ def get_slb_data():
                     if r.status_code == 401:
                         # Session expired — refresh and retry once
                         print('  [SLB API] 401 — refreshing session and retrying')
-                        nse_s = _fresh_nse_session()
+                        nse_s = get_nse_session(proxies=proxies, force_refresh=True)
                         r = nse_s.get(url, headers=api_headers, timeout=15, proxies=proxies)
                         print(f'  [SLB API] retry: {r.status_code}')
                     if not r.ok or len(r.text.strip()) < 5:
@@ -4141,19 +4148,34 @@ def get_slb_data():
                     print(f'  [SLB] {symbol}: {len(contracts)} contracts (JSON)')
                     continue
 
-            # CSV fallback
+            # CSV fallback — try today and last 4 trading days (handles weekends/holidays)
             csv_items = []
             try:
-                today   = _dt.date.today()
-                csv_url = f'https://archives.nseindia.com/archives/slbs/slbftp/slbwatch{today.strftime("%d%m%Y")}.csv'
-                r_csv   = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
-                print(f'  [SLB CSV] {r_csv.status_code} <- {csv_url}')
-                if r_csv.ok and r_csv.text.strip():
-                    for row in _csv.DictReader(io.StringIO(r_csv.text)):
-                        if str(row.get('SYMBOL') or '').upper().strip() == symbol:
-                            csv_items.append(dict(row))
+                import datetime as _dtt
+                today = _dt.date.today()
+                days_to_try = []
+                d = today
+                while len(days_to_try) < 5:
+                    if d.weekday() < 5:  # Mon-Fri only
+                        days_to_try.append(d)
+                    d -= _dtt.timedelta(days=1)
+
+                for try_date in days_to_try:
+                    csv_url = (f'https://archives.nseindia.com/archives/slbs/slbftp/'
+                               f'slbwatch{try_date.strftime("%d%m%Y")}.csv')
+                    try:
+                        r_csv = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
+                        print(f'  [SLB CSV] {r_csv.status_code} <- {csv_url}')
+                        if r_csv.ok and r_csv.text.strip():
+                            for row in _csv.DictReader(io.StringIO(r_csv.text)):
+                                if str(row.get('SYMBOL') or '').upper().strip() == symbol:
+                                    csv_items.append(dict(row))
+                            if csv_items:
+                                break  # found data, stop looking
+                    except Exception as ce:
+                        print(f'  [SLB CSV] error: {ce}')
             except Exception as ce:
-                print(f'  [SLB CSV] error: {ce}')
+                print(f'  [SLB CSV] outer error: {ce}')
 
             if csv_items:
                 contracts = _json_to_contracts(csv_items, symbol, months)
