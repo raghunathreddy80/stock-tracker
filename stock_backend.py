@@ -3733,17 +3733,15 @@ def get_slb_data():
             pass
 
         # ============================================================
-        # STRATEGY 0: Selenium (headless Chrome) — JS-rendered page
-        # NSE's SLB page is fully JavaScript-rendered, so plain HTTP
-        # requests only get an empty HTML shell. Selenium runs a real
-        # browser, waits for the table to populate, then returns the
-        # full rendered HTML for the same td[@headers] parser below.
+        # STRATEGY 0: Playwright — intercept NSE's internal XHR API
+        # Instead of parsing the rendered HTML table, we let Playwright
+        # load the page and intercept the actual JSON API response that
+        # NSE's JS fetches to populate the table. This is more reliable
+        # than HTML parsing and works even if the table structure changes.
         # ============================================================
         def _scrape_selenium_for_series(series_param=None):
-            """Use headless Chromium via Playwright to render the NSE SLB page.
-            Playwright bundles its own Chromium — no system apt-get needed.
-            Goes directly to the SLB page — NSE blocks headless browsers on
-            the homepage with HTTP2 errors, so we skip the warmup step."""
+            """Use Playwright to intercept NSE SLB XHR data.
+            Loads the page, captures the internal API JSON response."""
             try:
                 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
             except ImportError:
@@ -3754,7 +3752,9 @@ def get_slb_data():
             if series_param:
                 url += f'?series={series_param}'
 
-            print(f'  [SLB Playwright] loading {url}')
+            print(f'  [SLB Playwright] intercepting XHR for {url}')
+            intercepted_data = []
+
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.launch(
@@ -3765,7 +3765,6 @@ def get_slb_data():
                             '--disable-gpu',
                             '--disable-blink-features=AutomationControlled',
                             '--ignore-certificate-errors',
-                            '--allow-running-insecure-content',
                         ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
                     )
                     ctx = browser.new_context(
@@ -3775,16 +3774,12 @@ def get_slb_data():
                             'Chrome/122.0.0.0 Safari/537.36'
                         ),
                         viewport={'width': 1920, 'height': 1080},
-                        java_script_enabled=True,
-                        # Spoof a real browser locale/timezone
                         locale='en-IN',
                         timezone_id='Asia/Kolkata',
                         extra_http_headers={
                             'Accept-Language': 'en-IN,en;q=0.9',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                         }
                     )
-                    # Hide automation fingerprint
                     ctx.add_init_script("""
                         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                         Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
@@ -3793,54 +3788,57 @@ def get_slb_data():
                     """)
                     page = ctx.new_page()
 
-                    # Step 1: load NSE homepage to get session cookies
-                    # Use 'load' wait and catch errors gracefully
-                    try:
-                        page.goto('https://www.nseindia.com', timeout=30000, wait_until='load')
-                        page.wait_for_timeout(3000)
-                        print('  [SLB Playwright] homepage loaded OK')
-                    except Exception as home_err:
-                        # Homepage may fail due to bot detection — try to continue anyway
-                        print(f'  [SLB Playwright] homepage warning (continuing): {home_err}')
-                        page.wait_for_timeout(1000)
+                    # Intercept any response containing SLB data
+                    def handle_response(response):
+                        try:
+                            resp_url = response.url
+                            if any(k in resp_url for k in ['slb', 'SLB', 'slbMarket', 'lending', 'borrowing']):
+                                print(f'  [SLB XHR] intercepted: {resp_url}')
+                                try:
+                                    data = response.json()
+                                    intercepted_data.append(data)
+                                    print(f'  [SLB XHR] got JSON: {str(data)[:200]}')
+                                except Exception:
+                                    txt = response.text()
+                                    print(f'  [SLB XHR] non-JSON response: {txt[:200]}')
+                        except Exception as re:
+                            pass
 
-                    # Step 2: navigate to the SLB page
+                    page.on('response', handle_response)
+
+                    # Load NSE homepage for cookies — catch errors gracefully
                     try:
-                        page.goto(url, timeout=45000, wait_until='load')
+                        page.goto('https://www.nseindia.com', timeout=25000, wait_until='domcontentloaded')
+                        page.wait_for_timeout(2000)
+                        print('  [SLB Playwright] homepage OK')
+                    except Exception as e:
+                        print(f'  [SLB Playwright] homepage warn: {e}')
+
+                    # Navigate to SLB page — this triggers the XHR
+                    try:
+                        page.goto(url, timeout=40000, wait_until='domcontentloaded')
                     except Exception as nav_err:
-                        print(f'  [SLB Playwright] SLB page navigation error: {nav_err}')
-                        # Still try to get whatever content we have
-                        html_debug = page.content()
-                        print(f'  [SLB Playwright] partial content ({len(html_debug)} bytes): {html_debug[:800]}')
-                        browser.close()
-                        return {}
+                        print(f'  [SLB Playwright] nav warn: {nav_err}')
 
-                    # Step 3: wait for XHR data to populate the table
-                    # NSE loads table data via async XHR after page load
+                    # Wait for network to settle so XHR responses are captured
                     try:
-                        # Wait for network to go idle (all XHR done)
                         page.wait_for_load_state('networkidle', timeout=20000)
                     except PWTimeout:
-                        print('  [SLB Playwright] networkidle timeout — checking for table anyway')
+                        print('  [SLB Playwright] networkidle timeout')
 
-                    # Step 4: explicitly wait for td[headers] cells to appear
-                    try:
-                        page.wait_for_selector('td[headers]', timeout=20000)
-                        print('  [SLB Playwright] td[headers] found in DOM')
-                    except PWTimeout:
-                        # Log full page for diagnosis
-                        html_debug = page.content()
-                        print(f'  [SLB Playwright] no td[headers] found. Page size={len(html_debug)}')
-                        print(f'  [SLB Playwright] content preview: {html_debug[:1000]}')
-                        browser.close()
-                        return {}
+                    page.wait_for_timeout(3000)
 
-                    # Let any remaining lazy rows render
-                    page.wait_for_timeout(2000)
+                    # Also grab rendered HTML as fallback
                     html = page.content()
+                    print(f'  [SLB Playwright] page HTML: {len(html)} bytes')
+                    print(f'  [SLB Playwright] intercepted {len(intercepted_data)} XHR responses')
+                    print(f'  [SLB Playwright] HTML preview: {html[:600]}')
                     browser.close()
-                    print(f'  [SLB Playwright] got {len(html)} bytes of rendered HTML')
-                    return html
+
+                    # Return intercepted JSON data if we got any
+                    if intercepted_data:
+                        return {'_xhr_data': intercepted_data, '_html': html}
+                    return html  # fall back to HTML parsing
 
             except Exception as e:
                 print(f'  [SLB Playwright] error: {e}')
@@ -4088,23 +4086,35 @@ def get_slb_data():
         html_results = {}
         series_to_try = req_series if req_series else ['']
 
-        # Strategy 0: Selenium (preferred — handles JS-rendered content)
-        selenium_html = _scrape_selenium_for_series(series_to_try[0] if series_to_try[0] else None)
-        if isinstance(selenium_html, str) and len(selenium_html) > 2000:
-            partial = _parse_slb_html(selenium_html, symbols_set)
+        # Strategy 0: Playwright (XHR intercept + HTML fallback)
+        def _run_playwright(snum):
+            result = _scrape_selenium_for_series(snum if snum else None)
+            if isinstance(result, dict) and '_xhr_data' in result:
+                # We intercepted XHR JSON — extract items and parse
+                all_items = []
+                for d in result['_xhr_data']:
+                    all_items.extend(_extract_items(d))
+                print(f'  [SLB Playwright] XHR items: {len(all_items)}')
+                if all_items:
+                    contracts_map = {}
+                    for sym in symbols:
+                        c = _json_to_contracts(all_items, sym, months)
+                        if c:
+                            contracts_map[sym] = c
+                    return contracts_map
+                # XHR had no items — fall back to HTML
+                html = result.get('_html', '')
+                return _parse_slb_html(html, symbols_set) if html else {}
+            elif isinstance(result, str) and len(result) > 2000:
+                return _parse_slb_html(result, symbols_set)
+            return {}
+
+        for snum in series_to_try:
+            partial = _run_playwright(snum)
             for sym, contracts in partial.items():
                 if sym not in html_results:
                     html_results[sym] = []
                 html_results[sym].extend(contracts)
-            # Fetch remaining series if needed
-            for snum in series_to_try[1:]:
-                extra_html = _scrape_selenium_for_series(snum if snum else None)
-                if isinstance(extra_html, str) and len(extra_html) > 2000:
-                    extra = _parse_slb_html(extra_html, symbols_set)
-                    for sym, contracts in extra.items():
-                        if sym not in html_results:
-                            html_results[sym] = []
-                        html_results[sym].extend(contracts)
 
         # Strategy 1: Plain HTTP HTML scrape (fallback if Selenium unavailable)
         if not html_results:
