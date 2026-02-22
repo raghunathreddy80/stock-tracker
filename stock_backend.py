@@ -232,6 +232,35 @@ def unauthorized():
 # Initialize database
 init_db()
 
+
+# ── Auto-install Playwright browsers at startup ───────────────────────────────
+# Render free tier does not persist cache between deploys, so we install
+# Chromium once at startup if the executable is missing.
+def _ensure_playwright_chromium():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            import os as _os
+            exe = pw.chromium.executable_path
+            if not _os.path.exists(exe):
+                raise FileNotFoundError(exe)
+        print("checkmark Playwright Chromium already installed")
+    except Exception:
+        print("gear Installing Playwright Chromium browsers (first run)...")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True, timeout=180
+            )
+            if result.returncode == 0:
+                print("checkmark Playwright Chromium installed successfully")
+            else:
+                print(f"warning playwright install stderr: {result.stderr[-500:]}")
+        except Exception as e:
+            print(f"warning Could not install Playwright Chromium: {e}")
+
+_ensure_playwright_chromium()
+
 # ── Persistent NSE session (shared across requests, refreshed when needed) ────
 import threading
 _nse_session = None
