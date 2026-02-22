@@ -1619,7 +1619,7 @@
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.8rem;">
                     <div>
                         <h2 style="margin:0;font-size:1.1rem;color:var(--text-primary);">📋 Securities Lending &amp; Borrowing</h2>
-                        <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.2rem;">Series B · Auto-polls every 60s</div>
+                        <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.2rem;">Series B · Live during market hours (10:00–15:30 IST) · Auto-polls every 60s</div>
                     </div>
                     <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;">
                         <div id="slbStatus" style="font-size:0.75rem;color:var(--text-secondary);">Not loaded</div>
@@ -4198,7 +4198,7 @@
                             : `<span style="color:var(--text-secondary);font-size:0.73rem;">—</span>`;
 
                     const noDataNote = c.noData
-                        ? `<span style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">${c.error || 'No NSE data'}</span>`
+                        ? `<span style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">${c.error || 'No data — symbol may not be in SLB segment or market is closed'}</span>`
                         : '';
 
                     return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);background:${rowBg};">

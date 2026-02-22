@@ -3634,13 +3634,17 @@ def deepdive_simple():
 def get_slb_data():
     """
     Fetch SLB order book from NSE.
-    Returns raw items + parsed contracts so frontend can show all fields.
+    Strategy (in order):
+      1. /api/liveWatch?series=SLB  (NSE's current internal SLB endpoint)
+      2. /api/equity-stockIndices?index=SLB  (alternate index endpoint)
+      3. /api/quote-equity?symbol=X&section=trade_info  (per-symbol with SLB fields)
+      4. NSE all-reports CSV (end-of-day fallback)
     """
     try:
-        import datetime as _dt
+        import datetime as _dt, io, csv as _csv
         data       = request.get_json() or {}
         symbols    = [s.upper().strip() for s in data.get('symbols', [])]
-        months     = data.get('months', [])   # e.g. ["MAR2026","APR2026","MAY2026"]
+        months     = data.get('months', [])
         proxy_host = data.get('proxy_host', '').strip()
         proxy_port = data.get('proxy_port', '').strip()
         proxies    = make_proxies(proxy_host, proxy_port)
@@ -3648,193 +3652,202 @@ def get_slb_data():
         if not symbols:
             return jsonify({'slb': []})
 
-        NSE_SLB_HDR = {
-            'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept':          'application/json, text/plain, */*',
+        UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+
+        HDR_HTML = {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,*/*',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Referer':         'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+        }
+        HDR_API = {
+            'User-Agent': UA,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
             'X-Requested-With': 'XMLHttpRequest',
+            'Connection': 'keep-alive',
         }
 
-        # ── Warm up session specifically for SLB page ────────────────
-        def _warm_slb_session(s):
-            """Hit the SLB market page so NSE sets the right cookies."""
-            try:
-                s.get(
-                    'https://www.nseindia.com/market-data/securities-lending-and-borrowing',
-                    headers={
-                        'User-Agent': NSE_SLB_HDR['User-Agent'],
-                        'Accept': 'text/html,application/xhtml+xml,*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                    },
-                    timeout=20, proxies=proxies
-                )
-                print(f"  [SLB] SLB page warmed, cookies: {list(s.cookies.keys())}")
-            except Exception as e:
-                print(f"  [SLB] warm-up failed: {e}")
-
+        # ── Warm up session ──────────────────────────────────────────
         sess = get_nse_session(proxies=proxies)
-        _warm_slb_session(sess)
-        results = []
+        try:
+            sess.get('https://www.nseindia.com/market-data/securities-lending-and-borrowing',
+                     headers=HDR_HTML, timeout=15, proxies=proxies)
+            print(f"  [SLB] cookies after warm-up: {list(sess.cookies.keys())}")
+        except Exception as e:
+            print(f"  [SLB] warm-up failed: {e}")
 
-        def _get(url, s=None):
-            s = s or sess
+        def _get_json(url):
             try:
-                r = s.get(url, headers=NSE_SLB_HDR, timeout=20, proxies=proxies)
-                print(f"    HTTP {r.status_code} ← {url}")
-                if r and r.ok and len(r.text.strip()) > 2:
-                    return r
+                r = sess.get(url, headers=HDR_API, timeout=20, proxies=proxies)
+                print(f"    {r.status_code} ← {url}")
+                if r.ok and len(r.text.strip()) > 2:
+                    return r.json()
             except Exception as e:
-                print(f"    GET {url}: {e}")
+                print(f"    ERR {url}: {e}")
             return None
 
-        def _parse_val(item, *keys, default=0):
+        def _fv(item, *keys, default=0):
+            """Flexible value extractor – tries many key names."""
             for k in keys:
                 v = item.get(k)
-                if v is not None and v != '' and v != '-':
+                if v is not None and str(v).strip() not in ('', '-', 'NA', '--'):
                     try: return float(v)
                     except: return v
             return default
 
-        # ── Known working NSE SLB endpoints (priority order) ─────────
-        SLB_URLS = [
-            "https://www.nseindia.com/api/slbMarket",
-            "https://www.nseindia.com/api/slb-securities",
-            "https://www.nseindia.com/api/slb",
-        ]
-
-        for symbol in symbols:
-            print(f"\n  [SLB] {symbol}")
-            r = None
-
-            # Try each endpoint with symbol param
-            for base_url in SLB_URLS:
-                r = _get(f"{base_url}?symbol={symbol}")
-                if r:
-                    print(f"    OK: {base_url}")
-                    break
-
-            # Also try without symbol (full market dump) if all symbol-specific failed
-            if not r:
-                print(f"    Trying full market dump endpoints...")
-                for base_url in SLB_URLS:
-                    r = _get(base_url)
-                    if r:
-                        print(f"    OK (no symbol param): {base_url}")
-                        break
-
-            # Session expired? do a full refresh + re-warm + retry
-            if not r:
-                print(f"    Refreshing session...")
-                sess = get_nse_session(proxies=proxies, force_refresh=True)
-                _warm_slb_session(sess)
-                for base_url in SLB_URLS:
-                    r = _get(f"{base_url}?symbol={symbol}", s=sess)
-                    if r:
-                        break
-
-            if not r:
-                print(f"    No response for {symbol}")
-                results.append({'symbol': symbol, 'error': 'No response from NSE', 'contracts': [], 'raw_items': []})
-                continue
-
-            # ── Parse response ───────────────────────────────────────
-            print(f"    HTTP {r.status_code}, len={len(r.text)}")
-            print(f"    RAW (first 600): {r.text[:600]}")
-
-            try:
-                raw = r.json()
-            except Exception as je:
-                print(f"    JSON error: {je}")
-                results.append({'symbol': symbol, 'error': f'JSON error: {je}', 'contracts': [], 'raw_items': []})
-                continue
-
-            # Find the list of items — dump all keys for debug
-            items = []
-            if isinstance(raw, list):
-                items = raw
-                print(f"    Response is a list of {len(items)} items")
-            elif isinstance(raw, dict):
-                print(f"    Response keys: {list(raw.keys())}")
-                for k, v in raw.items():
-                    print(f"      {k!r}: {str(v)[:150]}")
-                for key in ['data', 'slbData', 'orderBook', 'SLB', 'slb', 'Table', 'records',
-                            'bidAsk', 'marketData', 'contractData', 'response']:
-                    if raw.get(key) and isinstance(raw[key], list):
-                        items = raw[key]
-                        print(f"    Found {len(items)} items under key={key!r}")
-                        break
-
-            if items:
-                print(f"    First item keys: {list(items[0].keys()) if isinstance(items[0], dict) else type(items[0])}")
-                print(f"    First item: {items[0]}")
-
-            # ── Build contracts ──────────────────────────────────────
+        def _parse_items(items, symbol):
+            """Convert raw item list → contracts list."""
             contracts = []
-            raw_items_out = []  # send ALL raw items back so frontend can display any field
-
             for item in items:
                 if not isinstance(item, dict):
                     continue
+                series = str(item.get('series', item.get('Series', item.get('SERIES', ''))) or '').upper().strip()
+                expiry = str(
+                    item.get('expiryDate') or item.get('expiry') or item.get('ExpiryDate') or
+                    item.get('contractExpiry') or item.get('EXPIRY_DT') or item.get('maturityDate') or ''
+                ).upper().strip()
+                sym = str(item.get('symbol') or item.get('Symbol') or item.get('SYMBOL') or symbol).upper()
 
-                raw_items_out.append(item)  # send raw to frontend
-
-                series = str(_parse_val(item, 'series', 'Series', 'SERIES', default='') or '').upper().strip()
-                expiry = str(_parse_val(item, 'expiryDate', 'expiry', 'ExpiryDate',
-                                        'contractExpiry', 'EXPIRY_DT', 'maturityDate', default='') or '').upper().strip()
-                sym    = str(_parse_val(item, 'symbol', 'Symbol', 'SYMBOL', default=symbol) or symbol).upper()
-
-                # Skip non-B series if series field exists
-                if series and series != 'B':
+                if series and series not in ('B', 'SLB'):
+                    continue
+                if months and expiry and not any(m.upper() in expiry for m in months):
                     continue
 
-                # Month filter
-                if months and expiry:
-                    if not any(m.upper() in expiry.upper() for m in months):
-                        continue
-
-                # Try every possible field name for bid/ask — dump all keys
-                bid_qty   = _parse_val(item, 'bestBidQty', 'bidQty', 'BID_QTY', 'lendQty',
-                                       'offerQty', 'LEND_QTY', 'lendingQty', 'qty', 'quantity')
-                bid_price = _parse_val(item, 'bestBidPrice', 'bidPrice', 'BID_PRICE', 'lendPrice',
-                                       'offerPrice', 'LEND_PRICE', 'lendingFee', 'price', 'fee')
-                ask_qty   = _parse_val(item, 'bestAskQty', 'askQty', 'ASK_QTY', 'borrowQty',
-                                       'BORROW_QTY', 'borrowingQty')
-                ask_price = _parse_val(item, 'bestAskPrice', 'askPrice', 'ASK_PRICE', 'borrowPrice',
-                                       'BORROW_PRICE', 'borrowingFee')
-                ltp       = _parse_val(item, 'ltp', 'LTP', 'lastPrice', 'lastTradedPrice', 'price')
+                bid_qty   = _fv(item, 'bestBidQty',   'bidQty',   'BID_QTY',   'lendQty',   'offerQty',    'LEND_QTY')
+                bid_price = _fv(item, 'bestBidPrice',  'bidPrice', 'BID_PRICE', 'lendPrice', 'offerPrice',  'LEND_PRICE', 'lendingFee', 'fee')
+                ask_qty   = _fv(item, 'bestAskQty',    'askQty',   'ASK_QTY',   'borrowQty', 'BORROW_QTY',  'borrowingQty')
+                ask_price = _fv(item, 'bestAskPrice',  'askPrice', 'ASK_PRICE', 'borrowPrice','BORROW_PRICE','borrowingFee')
+                ltp       = _fv(item, 'ltp', 'LTP', 'lastPrice', 'lastTradedPrice', 'ltP')
 
                 has_bid = float(bid_qty or 0) > 0
                 has_ask = float(ask_qty or 0) > 0
-
                 if has_bid:
-                    print(f"    *** BID: {sym} {expiry} qty={bid_qty} price={bid_price}")
-
+                    print(f"    *** BID {sym} {expiry} qty={bid_qty} @{bid_price}")
                 contracts.append({
-                    'symbol':       sym,
-                    'expiry':       expiry,
-                    'series':       series,
-                    'bidQty':       bid_qty,
-                    'bidPrice':     bid_price,
-                    'askQty':       ask_qty,
-                    'askPrice':     ask_price,
-                    'ltp':          ltp,
-                    'hasBid':       has_bid,
-                    'hasAsk':       has_ask,
-                    'raw':          item,   # include full raw item for frontend to display
+                    'symbol': sym, 'expiry': expiry, 'series': series,
+                    'bidQty': bid_qty, 'bidPrice': bid_price,
+                    'askQty': ask_qty, 'askPrice': ask_price,
+                    'ltp': ltp, 'hasBid': has_bid, 'hasAsk': has_ask,
+                    'raw': item,
                 })
+            return contracts
 
-            print(f"    → {len(contracts)} Series-B contracts in requested months")
-            results.append({
-                'symbol':    symbol,
-                'contracts': contracts,
-                'raw_count': len(items),
-                'raw_items': raw_items_out[:3],  # first 3 raw items for frontend debug display
-            })
+        # ════════════════════════════════════════════════════════════
+        # STRATEGY 1 – liveWatch?series=SLB  (whole market, one call)
+        # ════════════════════════════════════════════════════════════
+        all_live_items = []
+        live_raw = _get_json('https://www.nseindia.com/api/liveWatch?series=SLB')
+        if live_raw:
+            if isinstance(live_raw, list):
+                all_live_items = live_raw
+            elif isinstance(live_raw, dict):
+                for k in ('data', 'records', 'Table', 'slb', 'SLB', 'response'):
+                    if isinstance(live_raw.get(k), list):
+                        all_live_items = live_raw[k]
+                        break
+            print(f"  [SLB] liveWatch returned {len(all_live_items)} items")
+            if all_live_items:
+                print(f"  [SLB] sample keys: {list(all_live_items[0].keys()) if isinstance(all_live_items[0], dict) else '?'}")
+
+        # ════════════════════════════════════════════════════════════
+        # STRATEGY 2 – equity-stockIndices?index=SLB
+        # ════════════════════════════════════════════════════════════
+        if not all_live_items:
+            idx_raw = _get_json('https://www.nseindia.com/api/equity-stockIndices?index=SLB')
+            if idx_raw and isinstance(idx_raw, dict):
+                all_live_items = idx_raw.get('data', [])
+                print(f"  [SLB] equity-stockIndices returned {len(all_live_items)} items")
+
+        # ════════════════════════════════════════════════════════════
+        # STRATEGY 3 – per-symbol quote-equity trade_info
+        # ════════════════════════════════════════════════════════════
+        results = []
+        symbols_found_in_live = set()
+
+        # First, try to match symbols from the global live data
+        if all_live_items:
+            for symbol in symbols:
+                matching = [i for i in all_live_items
+                            if isinstance(i, dict) and
+                            str(i.get('symbol') or i.get('Symbol') or '').upper() == symbol]
+                if matching:
+                    symbols_found_in_live.add(symbol)
+                    contracts = _parse_items(matching, symbol)
+                    results.append({'symbol': symbol, 'contracts': contracts,
+                                    'raw_count': len(matching), 'raw_items': matching[:2],
+                                    'source': 'liveWatch'})
+                    print(f"  [SLB] {symbol}: {len(contracts)} contracts from liveWatch")
+
+        # For symbols not found in live data, try per-symbol endpoints
+        for symbol in symbols:
+            if symbol in symbols_found_in_live:
+                continue
+            print(f"\n  [SLB] {symbol} — trying per-symbol endpoints")
+            items = []
+            source = 'none'
+
+            per_sym_urls = [
+                f'https://www.nseindia.com/api/liveWatch?series=SLB&symbol={symbol}',
+                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}&section=trade_info',
+                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}',
+            ]
+            for url in per_sym_urls:
+                raw = _get_json(url)
+                if not raw:
+                    continue
+                if isinstance(raw, list) and raw:
+                    items = raw; source = url; break
+                if isinstance(raw, dict):
+                    # quote-equity: check slbInfo or marketDeptOrderBook
+                    slb_info = raw.get('slbInfo') or raw.get('slbData') or raw.get('SLBData')
+                    if slb_info:
+                        items = slb_info if isinstance(slb_info, list) else [slb_info]
+                        source = url; break
+                    # Also try nested data
+                    for k in ('data', 'records', 'Table', 'slb', 'SLB'):
+                        if isinstance(raw.get(k), list) and raw[k]:
+                            items = raw[k]; source = url; break
+                    if items:
+                        break
+
+            # ── Strategy 4: NSE CSV report fallback ─────────────────
+            if not items:
+                try:
+                    today = _dt.date.today()
+                    date_str = today.strftime('%d%m%Y')
+                    csv_url = f'https://archives.nseindia.com/archives/slbs/slbftp/slbwatch{date_str}.csv'
+                    r_csv = sess.get(csv_url, headers=HDR_API, timeout=15, proxies=proxies)
+                    print(f"    CSV {r_csv.status_code} ← {csv_url}")
+                    if r_csv.ok and r_csv.text.strip():
+                        reader = _csv.DictReader(io.StringIO(r_csv.text))
+                        for row in reader:
+                            sym_col = str(row.get('SYMBOL') or row.get('Symbol') or row.get('symbol') or '').upper().strip()
+                            if sym_col == symbol:
+                                items.append(dict(row))
+                        source = 'csv'
+                        print(f"    CSV: {len(items)} rows for {symbol}")
+                except Exception as ce:
+                    print(f"    CSV error: {ce}")
+
+            if not items:
+                results.append({
+                    'symbol': symbol,
+                    'error': 'No data from NSE — market may be closed or symbol not in SLB segment',
+                    'contracts': [], 'raw_items': [], 'source': 'none'
+                })
+            else:
+                contracts = _parse_items(items, symbol)
+                results.append({
+                    'symbol': symbol, 'contracts': contracts,
+                    'raw_count': len(items), 'raw_items': items[:2],
+                    'source': source
+                })
 
         return jsonify({
             'slb':       results,
             'timestamp': _dt.datetime.now().strftime('%H:%M:%S'),
+            'note':      'Live data during market hours (10:00–15:30 IST). NSE SLB market is thin — many stocks show no bids outside market hours.',
         })
 
     except Exception as e:
