@@ -4212,7 +4212,8 @@
                 });
 
                 (result.contracts || []).forEach(c => {
-                    const matchedMonth = activeMonths.find(m => c.expiry?.toUpperCase().includes(m));
+                    const _expUpper = (c.expiry || '').toUpperCase().replace(/[-\/\s]+/g, '');
+                    const matchedMonth = activeMonths.find(m => _expUpper.includes(m.replace(/\s/g,'')));
                     if (matchedMonth) {
                         byMonth[matchedMonth][result.symbol] = {
                             symbol:   result.symbol,
