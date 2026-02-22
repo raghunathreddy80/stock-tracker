@@ -3801,19 +3801,44 @@ def get_slb_data():
                     context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
                     page = context.new_page()
-                    url  = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
+
+                    # ── Step 1: Visit homepage to get NSE cookies ────
+                    print('  [SLB Playwright] warming up NSE session...')
+                    try:
+                        page.goto('https://www.nseindia.com', wait_until='domcontentloaded', timeout=20000)
+                        page.wait_for_timeout(3000)
+                    except Exception as warm_err:
+                        print(f'  [SLB Playwright] homepage warmup: {warm_err}')
+
+                    # ── Step 2: Navigate to SLB page ─────────────────
+                    url = 'https://www.nseindia.com/market-data/securities-lending-borrowing'
                     print(f'  [SLB Playwright] loading {url}')
 
-                    page.goto(url, wait_until='networkidle', timeout=30000)
-
-                    # Wait for table rows to appear (up to 15s)
                     try:
-                        page.wait_for_selector('table tbody tr', timeout=15000)
+                        page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    except Exception as nav_err:
+                        print(f'  [SLB Playwright] navigation error: {nav_err}')
+
+                    # ── Step 3: Wait for Angular/JS to render table ──
+                    # NSE uses Angular — table renders after XHR calls finish.
+                    # Wait up to 25s for any table row to appear.
+                    try:
+                        page.wait_for_selector('table tbody tr', timeout=25000)
+                        print('  [SLB Playwright] table rows appeared')
                     except Exception:
                         print('  [SLB Playwright] timeout waiting for table rows')
+                        # Log page title and URL to diagnose blocking
+                        try:
+                            print(f'  [SLB Playwright] page title: {page.title()}')
+                            print(f'  [SLB Playwright] page url:   {page.url}')
+                            # Check if we got a captcha or access denied
+                            body_text = page.inner_text('body')[:300] if page.query_selector('body') else ''
+                            print(f'  [SLB Playwright] body preview: {body_text}')
+                        except Exception:
+                            pass
 
                     # Extra buffer for all rows to fully render
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(4000)
 
                     rows = page.query_selector_all('table tbody tr')
                     print(f'  [SLB Playwright] found {len(rows)} table rows')
