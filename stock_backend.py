@@ -3741,7 +3741,9 @@ def get_slb_data():
         # ============================================================
         def _scrape_selenium_for_series(series_param=None):
             """Use headless Chromium via Playwright to render the NSE SLB page.
-            Playwright bundles its own Chromium — no system apt-get needed."""
+            Playwright bundles its own Chromium — no system apt-get needed.
+            Goes directly to the SLB page — NSE blocks headless browsers on
+            the homepage with HTTP2 errors, so we skip the warmup step."""
             try:
                 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
             except ImportError:
@@ -3762,6 +3764,9 @@ def get_slb_data():
                             '--disable-dev-shm-usage',
                             '--disable-gpu',
                             '--disable-blink-features=AutomationControlled',
+                            '--disable-http2',            # avoid HTTP2 protocol errors from NSE
+                            '--ignore-certificate-errors',
+                            '--allow-running-insecure-content',
                         ] + ([f'--proxy-server={proxy_host}:{proxy_port}'] if proxy_host and proxy_port else [])
                     )
                     ctx = browser.new_context(
@@ -3772,29 +3777,49 @@ def get_slb_data():
                         ),
                         viewport={'width': 1920, 'height': 1080},
                         java_script_enabled=True,
+                        # Spoof a real browser locale/timezone
+                        locale='en-IN',
+                        timezone_id='Asia/Kolkata',
+                        extra_http_headers={
+                            'Accept-Language': 'en-IN,en;q=0.9',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        }
                     )
-                    ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    # Hide automation fingerprint
+                    ctx.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN','en']});
+                        window.chrome = {runtime: {}};
+                    """)
                     page = ctx.new_page()
 
-                    # Visit homepage first to get NSE session cookies
-                    page.goto('https://www.nseindia.com', timeout=20000)
-                    page.wait_for_timeout(2000)
-
-                    # Navigate to SLB page
-                    page.goto(url, timeout=30000)
-
-                    # Wait for JS-rendered table data
+                    # Go directly to SLB page — skip homepage (NSE blocks headless there)
                     try:
-                        page.wait_for_selector('td[headers]', timeout=25000)
+                        page.goto(url, timeout=45000, wait_until='domcontentloaded')
+                    except Exception as nav_err:
+                        print(f'  [SLB Playwright] navigation error: {nav_err}')
+                        browser.close()
+                        return {}
+
+                    # Wait for JS to render the data table
+                    try:
+                        page.wait_for_selector('td[headers]', timeout=30000)
                     except PWTimeout:
+                        # Fallback: check if there is any table at all
                         try:
-                            page.wait_for_selector('table tbody tr', timeout=10000)
+                            page.wait_for_selector('table', timeout=10000)
+                            print('  [SLB Playwright] found table but no td[headers] — page may be partially rendered')
                         except PWTimeout:
-                            print('  [SLB Playwright] timed out waiting for table data')
+                            print('  [SLB Playwright] timed out — no table rendered')
+                            # Save a debug snapshot of what we got anyway
+                            html_debug = page.content()
+                            print(f'  [SLB Playwright] page content preview: {html_debug[:500]}')
                             browser.close()
                             return {}
 
-                    page.wait_for_timeout(2000)
+                    # Let remaining rows finish rendering
+                    page.wait_for_timeout(3000)
                     html = page.content()
                     browser.close()
                     print(f'  [SLB Playwright] got {len(html)} bytes of rendered HTML')
