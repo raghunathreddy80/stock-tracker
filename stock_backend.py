@@ -1216,13 +1216,7 @@ def get_announcements():
                                     got = bool(parsed)
                                     break
                                 else:
-                                    # Still nothing — just take the 3 most recent regardless of date
-                                    recent = items[:3]
-                                    print(f"  NSE: {len(items)} total items, none in 48h window — taking {len(recent)} most recent")
-                                    parsed = parse_items(recent, symbol, base, 'NSE')
-                                    all_ann.extend(parsed)
-                                    got = bool(parsed)
-                                    break
+                                    print(f"  NSE: {len(items)} total items, none in 48h window — skipping stale results")
                         except Exception as e:
                             print(f"  NSE parse error: {e}")
 
