@@ -1615,46 +1615,34 @@
         <!-- SLB Tab -->
         <div class="tab-content" id="slb-tab">
             <div style="padding:1.5rem;">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.2rem;flex-wrap:wrap;gap:0.8rem;">
+                <!-- Header -->
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.8rem;">
                     <div>
-                        <h2 style="margin:0;font-size:1.2rem;color:var(--text-primary);">📋 Securities Lending &amp; Borrowing</h2>
-                        <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.25rem;">Series B · Watching: MAR, APR, MAY 2026 · Polls every 60s</div>
+                        <h2 style="margin:0;font-size:1.1rem;color:var(--text-primary);">📋 Securities Lending &amp; Borrowing</h2>
+                        <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.2rem;">Series B · MAR / APR / MAY 2026 · Auto-polls every 60s</div>
                     </div>
-                    <div style="display:flex;align-items:center;gap:0.8rem;">
-                        <div id="slbStatus" style="font-size:0.78rem;color:var(--text-secondary);">Not loaded</div>
-                        <button class="btn" onclick="fetchSLB()" style="padding:0.4rem 0.9rem;font-size:0.85rem;">🔄 Refresh</button>
+                    <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;">
+                        <div id="slbStatus" style="font-size:0.75rem;color:var(--text-secondary);">Not loaded</div>
+                        <button class="btn" onclick="fetchSLB()" style="padding:0.35rem 0.8rem;font-size:0.82rem;">🔄 Refresh</button>
                     </div>
                 </div>
 
-                <div id="slbAlertBanner" style="display:none;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.5);border-radius:8px;padding:0.8rem 1rem;margin-bottom:1rem;color:#ef4444;font-weight:600;font-size:0.9rem;"></div>
+                <!-- Alert banner -->
+                <div id="slbAlertBanner" style="display:none;background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.45);border-radius:8px;padding:0.7rem 1rem;margin-bottom:1rem;color:#ef4444;font-weight:600;font-size:0.88rem;"></div>
 
-                <div style="margin-bottom:1rem;">
-                    <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.4rem;font-weight:600;">WATCHING</div>
-                    <div id="slbSymbolTags" style="display:flex;gap:0.4rem;flex-wrap:wrap;"></div>
-                </div>
+                <!-- Per-month tables injected here by JS -->
+                <div id="slbMonthTables"></div>
 
-                <div style="overflow-x:auto;">
-                    <table style="width:100%;border-collapse:collapse;font-size:0.85rem;">
-                        <thead>
-                            <tr style="background:var(--bg-tertiary);border-bottom:1px solid var(--border-color);">
-                                <th style="padding:0.7rem 1rem;text-align:left;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Symbol</th>
-                                <th style="padding:0.7rem 1rem;text-align:left;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Expiry</th>
-                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Bid Qty</th>
-                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Bid Price</th>
-                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Ask Qty</th>
-                                <th style="padding:0.7rem 1rem;text-align:right;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Best Ask Price</th>
-                                <th style="padding:0.7rem 1rem;text-align:center;color:var(--text-secondary);font-weight:600;font-size:0.75rem;text-transform:uppercase;">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="slbTableBody">
-                            <tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">Loading SLB data...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+                <!-- Raw debug panel (collapsed) -->
+                <details style="margin-top:1.2rem;">
+                    <summary style="font-size:0.75rem;color:var(--text-secondary);cursor:pointer;">🔍 Raw API response (debug)</summary>
+                    <pre id="slbRawDebug" style="font-size:0.7rem;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:6px;padding:0.7rem;margin-top:0.4rem;overflow-x:auto;max-height:14rem;white-space:pre-wrap;"></pre>
+                </details>
 
-                <div style="margin-top:1.5rem;">
-                    <div style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.5rem;font-weight:600;">🔔 BID ALERT LOG</div>
-                    <div id="slbAlertLog" style="font-size:0.8rem;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:8px;padding:0.8rem;min-height:3rem;max-height:10rem;overflow-y:auto;">No bids detected yet.</div>
+                <!-- Alert log -->
+                <div style="margin-top:1.2rem;">
+                    <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:0.4rem;font-weight:600;">🔔 BID ALERT LOG</div>
+                    <div id="slbAlertLog" style="font-size:0.78rem;color:var(--text-secondary);background:var(--bg-tertiary);border-radius:8px;padding:0.75rem;min-height:2.5rem;max-height:8rem;overflow-y:auto;">No bids detected yet.</div>
                 </div>
             </div>
         </div>
@@ -3997,22 +3985,14 @@
         let slbInterval    = null;
         let slbInitialized = false;
         let slbAlertedKeys = new Set();
+        let slbLastRaw     = null;  // store last response for debug
 
         function initSLBTab() {
             if (!slbInitialized) {
                 slbInitialized = true;
-                renderSLBSymbolTags();
                 fetchSLB();
                 slbInterval = setInterval(fetchSLB, 60_000);
             }
-        }
-
-        function renderSLBSymbolTags() {
-            const wrap = document.getElementById('slbSymbolTags');
-            if (!wrap) return;
-            wrap.innerHTML = SLB_SYMBOLS.map(s =>
-                `<span style="background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;padding:0.2rem 0.6rem;font-size:0.78rem;color:var(--text-primary);">${s}</span>`
-            ).join('');
         }
 
         async function fetchSLB() {
@@ -4029,80 +4009,163 @@
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
-                renderSLBTable(data.slb || []);
-                if (statusEl) statusEl.textContent = `Last updated: ${data.timestamp || new Date().toLocaleTimeString('en-IN')}`;
+                slbLastRaw = data;
+                renderSLBMonthTables(data.slb || []);
+
+                // Show raw debug
+                const dbg = document.getElementById('slbRawDebug');
+                if (dbg) dbg.textContent = JSON.stringify(data, null, 2);
+
+                if (statusEl) statusEl.textContent = `Updated: ${data.timestamp || new Date().toLocaleTimeString('en-IN')}`;
             } catch (e) {
                 console.error('SLB fetch error:', e);
                 if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+                const dbg = document.getElementById('slbRawDebug');
+                if (dbg) dbg.textContent = `Error: ${e.message}`;
             }
         }
 
-        function renderSLBTable(slbData) {
-            const tbody       = document.getElementById('slbTableBody');
+        function fmt(v) {
+            if (v === null || v === undefined || v === 0 || v === '') return '—';
+            if (typeof v === 'number') return v % 1 === 0 ? v.toLocaleString('en-IN') : v.toFixed(2);
+            return v;
+        }
+
+        function renderSLBMonthTables(slbData) {
+            const wrap        = document.getElementById('slbMonthTables');
             const alertBanner = document.getElementById('slbAlertBanner');
             const alertLog    = document.getElementById('slbAlertLog');
-            if (!tbody) return;
+            if (!wrap) return;
 
             const newBids = [];
-            const rows    = [];
+            let html = '';
+
+            // Build a lookup: month → symbol → contract
+            // A contract might not exist if NSE returned nothing for that symbol+month
+            const byMonth = {};
+            SLB_MONTHS.forEach(m => { byMonth[m] = {}; });
 
             slbData.forEach(result => {
-                if (!result.contracts?.length) {
-                    SLB_MONTHS.forEach(m => {
-                        rows.push(`<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
-                            <td style="padding:0.65rem 1rem;color:var(--text-primary);font-weight:600;">${result.symbol}</td>
-                            <td style="padding:0.65rem 1rem;color:var(--text-secondary);">${m}</td>
-                            <td colspan="5" style="padding:0.65rem 1rem;color:var(--text-secondary);font-size:0.78rem;">${result.error || 'No Series B data'}</td>
-                        </tr>`);
-                    });
-                    return;
-                }
+                // Always initialise all months for this symbol (so we can show "—" rows)
+                SLB_MONTHS.forEach(m => {
+                    if (!byMonth[m][result.symbol]) {
+                        byMonth[m][result.symbol] = {
+                            symbol: result.symbol,
+                            bidQty: 0, bidPrice: 0,
+                            askQty: 0, askPrice: 0,
+                            ltp: 0, hasBid: false, hasAsk: false,
+                            error: result.error || null,
+                            noData: !result.contracts?.length,
+                        };
+                    }
+                });
 
-                result.contracts.forEach(c => {
-                    const hasBid = c.hasBid;
-                    const key    = `${c.symbol}|${c.expiry}|${c.bestBidQty}|${c.bestBidPrice}`;
-                    const rowBg  = hasBid ? 'rgba(16,185,129,0.07)' : 'transparent';
-                    const bidClr = hasBid ? '#10b981' : 'var(--text-secondary)';
-                    const bidWt  = hasBid ? '700' : '400';
+                (result.contracts || []).forEach(c => {
+                    // Match month — contract expiry like "27MAR2026" or "MAR-2026"
+                    const matchedMonth = SLB_MONTHS.find(m => c.expiry?.toUpperCase().includes(m));
+                    if (matchedMonth) {
+                        byMonth[matchedMonth][result.symbol] = {
+                            symbol:   result.symbol,
+                            bidQty:   c.bidQty,
+                            bidPrice: c.bidPrice,
+                            askQty:   c.askQty,
+                            askPrice: c.askPrice,
+                            ltp:      c.ltp,
+                            hasBid:   c.hasBid,
+                            hasAsk:   c.hasAsk,
+                            expiry:   c.expiry,
+                            raw:      c.raw,
+                        };
 
-                    rows.push(`<tr style="border-bottom:1px solid rgba(255,255,255,0.05);background:${rowBg};">
-                        <td style="padding:0.65rem 1rem;color:var(--text-primary);font-weight:600;">${c.symbol}</td>
-                        <td style="padding:0.65rem 1rem;color:var(--text-secondary);">${c.expiry}</td>
-                        <td style="padding:0.65rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${c.bestBidQty || '—'}</td>
-                        <td style="padding:0.65rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${c.bestBidPrice ? '₹'+c.bestBidPrice : '—'}</td>
-                        <td style="padding:0.65rem 1rem;text-align:right;color:var(--text-secondary);">${c.bestAskQty || '—'}</td>
-                        <td style="padding:0.65rem 1rem;text-align:right;color:var(--text-secondary);">${c.bestAskPrice ? '₹'+c.bestAskPrice : '—'}</td>
-                        <td style="padding:0.65rem 1rem;text-align:center;">
-                            ${hasBid
-                                ? '<span style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid rgba(16,185,129,0.4);border-radius:4px;padding:0.2rem 0.55rem;font-size:0.73rem;font-weight:700;">🟢 BID</span>'
-                                : '<span style="color:var(--text-secondary);font-size:0.75rem;">No bid</span>'}
-                        </td>
-                    </tr>`);
-
-                    if (hasBid && !slbAlertedKeys.has(key)) {
-                        slbAlertedKeys.add(key);
-                        newBids.push(`${c.symbol} ${c.expiry}: Bid ${c.bestBidQty}@₹${c.bestBidPrice}`);
+                        // Alert on new bids
+                        if (c.hasBid) {
+                            const key = `${result.symbol}|${c.expiry}|${c.bidQty}|${c.bidPrice}`;
+                            if (!slbAlertedKeys.has(key)) {
+                                slbAlertedKeys.add(key);
+                                newBids.push(`${result.symbol} ${c.expiry}: Bid ${c.bidQty}@₹${c.bidPrice}`);
+                            }
+                        }
                     }
                 });
             });
 
-            tbody.innerHTML = rows.join('') ||
-                '<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--text-secondary);">No Series B contracts found for MAR/APR/MAY 2026</td></tr>';
+            // Render one table per month
+            SLB_MONTHS.forEach(month => {
+                const rows = SLB_SYMBOLS.map(sym => {
+                    const c = byMonth[month][sym] || {};
+                    const hasBid  = c.hasBid;
+                    const hasAsk  = c.hasAsk;
+                    const rowBg   = hasBid ? 'rgba(16,185,129,0.07)' : 'transparent';
+                    const bidClr  = hasBid ? '#10b981' : 'var(--text-secondary)';
+                    const bidWt   = hasBid ? '700' : '400';
+                    const askClr  = hasAsk ? '#f59e0b' : 'var(--text-secondary)';
+
+                    // Show all raw keys if present so we can see what NSE actually sends
+                    let rawHint = '';
+                    if (c.raw && !hasBid && !hasAsk) {
+                        const keys = Object.keys(c.raw).filter(k => c.raw[k] !== null && c.raw[k] !== '');
+                        if (keys.length) rawHint = `<div style="font-size:0.65rem;color:var(--text-secondary);opacity:0.6;margin-top:0.15rem;">raw: ${keys.slice(0,6).join(', ')}</div>`;
+                    }
+
+                    const statusBadge = hasBid
+                        ? `<span style="background:rgba(16,185,129,0.2);color:#10b981;border:1px solid rgba(16,185,129,0.4);border-radius:4px;padding:0.15rem 0.5rem;font-size:0.72rem;font-weight:700;">🟢 BID</span>`
+                        : hasAsk
+                            ? `<span style="background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.35);border-radius:4px;padding:0.15rem 0.5rem;font-size:0.72rem;">🟡 OFFER</span>`
+                            : `<span style="color:var(--text-secondary);font-size:0.73rem;">—</span>`;
+
+                    const noDataNote = c.noData
+                        ? `<span style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">${c.error || 'No NSE data'}</span>`
+                        : '';
+
+                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);background:${rowBg};">
+                        <td style="padding:0.6rem 1rem;font-weight:600;color:var(--text-primary);">${sym}${rawHint}</td>
+                        <td style="padding:0.6rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${fmt(c.bidQty)}</td>
+                        <td style="padding:0.6rem 1rem;text-align:right;color:${bidClr};font-weight:${bidWt};">${c.bidPrice ? '₹'+fmt(c.bidPrice) : '—'}</td>
+                        <td style="padding:0.6rem 1rem;text-align:right;color:${askClr};">${fmt(c.askQty)}</td>
+                        <td style="padding:0.6rem 1rem;text-align:right;color:${askClr};">${c.askPrice ? '₹'+fmt(c.askPrice) : '—'}</td>
+                        <td style="padding:0.6rem 1rem;text-align:right;color:var(--text-secondary);">${c.ltp ? '₹'+fmt(c.ltp) : '—'}</td>
+                        <td style="padding:0.6rem 1rem;text-align:center;">${statusBadge}${noDataNote}</td>
+                    </tr>`;
+                }).join('');
+
+                const anyBid = SLB_SYMBOLS.some(s => byMonth[month][s]?.hasBid);
+                const headerAccent = anyBid ? '#10b981' : 'var(--text-secondary)';
+
+                html += `
+                <div style="margin-bottom:1.8rem;">
+                    <div style="font-size:0.88rem;font-weight:700;color:${headerAccent};margin-bottom:0.5rem;display:flex;align-items:center;gap:0.5rem;">
+                        ${anyBid ? '🟢' : '📅'} ${month}
+                        ${anyBid ? '<span style="font-size:0.72rem;background:rgba(16,185,129,0.15);color:#10b981;border-radius:4px;padding:0.1rem 0.5rem;">BID ACTIVE</span>' : ''}
+                    </div>
+                    <div style="overflow-x:auto;">
+                        <table style="width:100%;border-collapse:collapse;font-size:0.83rem;">
+                            <thead>
+                                <tr style="background:var(--bg-tertiary);border-bottom:1px solid var(--border-color);">
+                                    <th style="padding:0.55rem 1rem;text-align:left;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Symbol</th>
+                                    <th style="padding:0.55rem 1rem;text-align:right;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Bid Qty</th>
+                                    <th style="padding:0.55rem 1rem;text-align:right;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Bid Price</th>
+                                    <th style="padding:0.55rem 1rem;text-align:right;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Offer Qty</th>
+                                    <th style="padding:0.55rem 1rem;text-align:right;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Offer Price</th>
+                                    <th style="padding:0.55rem 1rem;text-align:right;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">LTP</th>
+                                    <th style="padding:0.55rem 1rem;text-align:center;color:var(--text-secondary);font-size:0.72rem;text-transform:uppercase;font-weight:600;">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+            });
+
+            wrap.innerHTML = html;
 
             // Alert banner
             const anyActiveBid = slbData.some(r => r.contracts?.some(c => c.hasBid));
-            if (anyActiveBid) {
-                alertBanner.style.display = 'block';
-            } else {
-                alertBanner.style.display = 'none';
-            }
-
+            alertBanner.style.display = anyActiveBid ? 'block' : 'none';
             if (newBids.length > 0) {
-                alertBanner.textContent = '🚨 BID DETECTED: ' + newBids.join(' | ');
+                alertBanner.textContent = '🚨 NEW BID: ' + newBids.join(' | ');
                 const time = new Date().toLocaleTimeString('en-IN');
                 const prev = alertLog.innerHTML === 'No bids detected yet.' ? '' : alertLog.innerHTML;
                 alertLog.innerHTML = `<div style="color:#10b981;font-weight:600;">[${time}] ${newBids.join(', ')}</div>` + prev;
-
                 if (Notification.permission === 'granted') {
                     new Notification('SLB Bid Alert 🚨', { body: newBids.join('\n') });
                 } else if (Notification.permission !== 'denied') {
