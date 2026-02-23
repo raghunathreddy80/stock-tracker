@@ -816,7 +816,51 @@ def admin_get_users():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/fix-watchlist-dupes')
+@app.route('/api/admin/users/remove', methods=['POST'])
+def admin_remove_user():
+    """
+    Admin endpoint: delete a user and all their data (watchlist, portfolio).
+    """
+    try:
+        data     = request.get_json() or {}
+        username = (data.get('username') or '').strip()
+        if not username:
+            return jsonify({'success': False, 'message': 'No username provided'}), 400
+
+        conn = get_db_connection()
+        c    = conn.cursor()
+
+        # Get the user id first
+        if USE_POSTGRES:
+            c.execute('SELECT id FROM users WHERE username = %s', (username,))
+        else:
+            c.execute('SELECT id FROM users WHERE username = ?', (username,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({'success': False, 'message': f'User "{username}" not found'}), 404
+
+        user_id = row['id']
+
+        # Delete watchlist, portfolio, then the user
+        if USE_POSTGRES:
+            c.execute('DELETE FROM watchlists WHERE user_id = %s', (user_id,))
+            c.execute('DELETE FROM portfolio  WHERE user_id = %s', (user_id,))
+            c.execute('DELETE FROM users      WHERE id      = %s', (user_id,))
+        else:
+            c.execute('DELETE FROM watchlists WHERE user_id = ?', (user_id,))
+            c.execute('DELETE FROM portfolio  WHERE user_id = ?', (user_id,))
+            c.execute('DELETE FROM users      WHERE id      = ?', (user_id,))
+
+        conn.commit()
+        conn.close()
+        print(f"  [admin] Deleted user '{username}' (id={user_id})")
+        return jsonify({'success': True, 'message': f'User "{username}" removed successfully'})
+
+    except Exception as e:
+        print(f"Admin remove user error: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({'success': False, 'message': str(e)}), 500
 def fix_watchlist_dupes():
     """TEMPORARY: Delete stuck/duplicate watchlist rows so they can be re-added."""
     try:
