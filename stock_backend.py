@@ -4,7 +4,7 @@ Run: python stock_backend.py
 Then open stock_tracker.html in your browser
 """
 
-import subprocess, sys, os, re
+import subprocess, sys, os, re, gc
 from datetime import datetime
 
 # ── auto-install ──────────────────────────────────────────────────────────────
@@ -202,8 +202,8 @@ CORS(app)
 # Base directory — always resolve relative to this file, not cwd
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load HTML files into memory at startup so file path issues on hosting
-# platforms (Render, Railway, etc.) can never cause a 404.
+# HTML files are read from disk on each request instead of held in RAM at startup.
+# stock_tracker.html is 193KB — no need to keep it permanently in Python's heap.
 def _read_file(filename):
     path = os.path.join(BASE_DIR, filename)
     try:
@@ -212,10 +212,6 @@ def _read_file(filename):
     except Exception as e:
         print(f"WARNING: could not read {path}: {e}")
         return f"<h1>File not found: {filename}</h1>"
-
-_LOGIN_HTML        = _read_file('login.html')
-_STOCK_TRACKER_HTML = _read_file('stock_tracker.html')
-_SUBSTACK_HTML     = _read_file('substack_post.html')
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -333,19 +329,19 @@ from flask import Response
 
 @app.route('/')
 def home():
-    return Response(_LOGIN_HTML, mimetype='text/html')
+    return Response(_read_file('login.html'), mimetype='text/html')
 
 @app.route('/login.html')
 def login_page():
-    return Response(_LOGIN_HTML, mimetype='text/html')
+    return Response(_read_file('login.html'), mimetype='text/html')
 
 @app.route('/stock_tracker.html')
 def stock_tracker_page():
-    return Response(_STOCK_TRACKER_HTML, mimetype='text/html')
+    return Response(_read_file('stock_tracker.html'), mimetype='text/html')
 
 @app.route('/substack_post.html')
 def substack_post_page():
-    return Response(_SUBSTACK_HTML, mimetype='text/html')
+    return Response(_read_file('substack_post.html'), mimetype='text/html')
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -971,7 +967,7 @@ def get_prices_bulk():
             print(f"  Error fetching {symbol}: {e}")
         return symbol, None
 
-    with ThreadPoolExecutor(max_workers=min(len(symbols), 10)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(symbols), 4)) as executor:
         futures = {executor.submit(fetch_one, s): s for s in symbols}
         for future in as_completed(futures):
             symbol, pdata = future.result()
@@ -979,6 +975,7 @@ def get_prices_bulk():
                 results[symbol] = pdata
 
     print(f"  Got prices for {len(results)}/{len(symbols)} symbols")
+    gc.collect()
     return jsonify({'prices': results})
 
 
@@ -4194,6 +4191,7 @@ def get_slb_data():
                     'contracts': [], 'raw_items': [], 'source': 'none',
                 })
 
+        gc.collect()
         return jsonify({
             'slb':       results,
             'timestamp': _dt.datetime.now().strftime('%H:%M:%S'),
