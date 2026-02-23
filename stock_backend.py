@@ -232,27 +232,9 @@ init_db()
 # On Render, the browser download path may differ between build and runtime.
 # We pin the path to a folder inside the project and install if missing.
 def _ensure_playwright_browser():
-    playwright_path = os.path.join(BASE_DIR, '.playwright-browsers')
-    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = playwright_path
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            browser.close()
-        print(f'✓ Playwright Chromium ready at {playwright_path}')
-    except Exception:
-        print(f'  Playwright browser missing — installing to {playwright_path}...')
-        import subprocess as _sp
-        result = _sp.run(
-            [sys.executable, '-m', 'playwright', 'install', 'chromium'],
-            capture_output=True, text=True
-        )
-        if result.stdout:
-            print(result.stdout[-500:])
-        if result.returncode == 0:
-            print('✓ Playwright Chromium installed successfully')
-        else:
-            print(f'  Playwright install stderr: {result.stderr[-300:]}')
+    # Playwright/Selenium is not available on Render free tier.
+    # Skip the browser check entirely to avoid blocking startup.
+    print('  [Playwright] skipped — not available on this host')
 
 _ensure_playwright_browser()
 
